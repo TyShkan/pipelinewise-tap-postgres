@@ -36,25 +36,27 @@ def fetch_max_replication_key(conn_config, replication_key, schema_name, table_n
 def sync_table(conn_info, stream, state, desired_columns, md_map):
     time_extracted = utils.now()
 
-    stream_version = singer.get_bookmark(state, stream['tap_stream_id'], 'version')
-    if stream_version is None:
-        stream_version = int(time.time() * 1000)
+    # before writing the table version to state, check if we had one to begin with
+    first_run = singer.get_bookmark(state, stream['tap_stream_id'], 'version') is None
+    if first_run:
+        nascent_stream_version = int(time.time() * 1000)
 
     state = singer.write_bookmark(state,
                                   stream['tap_stream_id'],
                                   'version',
-                                  stream_version)
+                                  nascent_stream_version)
     singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
+
+    if first_run:
+        activate_version_message = singer.ActivateVersionMessage(
+            stream=post_db.calculate_destination_stream_name(stream, md_map),
+            version=nascent_stream_version)
+        LOGGER.info("Activate version %s", nascent_stream_version)
+        singer.write_message(activate_version_message)
 
     schema_name = md_map.get(()).get('schema-name')
 
     escaped_columns = map(partial(post_db.prepare_columns_for_select_sql, md_map=md_map), desired_columns)
-
-    activate_version_message = singer.ActivateVersionMessage(
-        stream=post_db.calculate_destination_stream_name(stream, md_map),
-        version=stream_version)
-
-    singer.write_message(activate_version_message)
 
     replication_key = md_map.get((), {}).get('replication-key')
     replication_key_value = singer.get_bookmark(state, stream['tap_stream_id'], 'replication_key_value')
@@ -80,7 +82,7 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
 
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name='pipelinewise') as cur:
                 cur.itersize = post_db.CURSOR_ITER_SIZE
-                LOGGER.info("Beginning new incremental replication sync %s", stream_version)
+                LOGGER.info("Beginning new incremental replication sync %s", nascent_stream_version)
                 select_sql = _get_select_sql({"escaped_columns": escaped_columns,
                                               "replication_key": replication_key,
                                               "replication_key_sql_datatype": replication_key_sql_datatype,
@@ -97,7 +99,7 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                 for rec in cur:
                     record_message = post_db.selected_row_to_singer_message(stream,
                                                                             rec,
-                                                                            stream_version,
+                                                                            nascent_stream_version,
                                                                             desired_columns,
                                                                             time_extracted,
                                                                             md_map)

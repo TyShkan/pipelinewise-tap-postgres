@@ -131,6 +131,7 @@ def sync_method_for_streams(streams, state, default_replication_method):
             # finishing previously interrupted full-table (first stage of logical replication)
             lookup[stream['tap_stream_id']] = 'logical_initial_interrupted'
             traditional_steams.append(stream)
+            logical_streams.append(stream)
 
         # inconsistent state
         elif get_bookmark(state, stream['tap_stream_id'], 'xmin') and \
@@ -142,6 +143,7 @@ def sync_method_for_streams(streams, state, default_replication_method):
             # initial full-table phase of logical replication
             lookup[stream['tap_stream_id']] = 'logical_initial'
             traditional_steams.append(stream)
+            logical_streams.append(stream)
 
         else:  # no xmin but we have an lsn
             # initial stage of logical replication(full-table) has been completed. moving onto pure logical replication
@@ -199,11 +201,13 @@ def sync_logical_streams(conn_config, logical_streams, state, end_lsn, state_fil
     Sync streams that use LOG_BASED method
     """
     if logical_streams:
-        LOGGER.info("Pure Logical Replication upto lsn %s for (%s)", end_lsn,
+        LOGGER.info("Pure Logical Replication upto lsn %s for (%s)", logical_replication.printable_lsn(lsni=end_lsn),
                     [s['tap_stream_id'] for s in logical_streams])
 
         logical_streams = [logical_replication.add_automatic_properties(
             s, conn_config.get('debug_lsn', False)) for s in logical_streams]
+
+        LOGGER.info('debug_lsn = %s', conn_config.get('debug_lsn'))
 
         # Remove LOG_BASED stream bookmarks from state if it has been de-selected
         # This is to avoid sending very old starting and flushing positions to source
@@ -283,9 +287,9 @@ def do_sync(conn_config, catalog, default_replication_method, state, state_file=
     if any_logical_streams(streams, default_replication_method):
         # Use of logical replication requires fetching an lsn
         end_lsn = logical_replication.fetch_current_lsn(conn_config)
-        LOGGER.debug("end_lsn = %s ", end_lsn)
     else:
         end_lsn = None
+    LOGGER.debug("end_lsn = %s", logical_replication.printable_lsn(lsni=end_lsn))
 
     refresh_streams_schema(conn_config, streams)
 
@@ -404,7 +408,7 @@ def main_impl():
         # Optional config keys
         'tap_id': args.config.get('tap_id'),
         'filter_schemas': args.config.get('filter_schemas'),
-        'debug_lsn': args.config.get('debug_lsn') == 'true',
+        'debug_lsn': args.config.get('debug_lsn', False),
         'max_run_seconds': args.config.get('max_run_seconds', 43200),
         'break_at_end_lsn': args.config.get('break_at_end_lsn', True),
         'logical_poll_total_seconds': float(args.config.get('logical_poll_total_seconds', 0)),
