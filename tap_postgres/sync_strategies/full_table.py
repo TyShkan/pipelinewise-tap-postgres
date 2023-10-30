@@ -19,8 +19,6 @@ UPDATE_BOOKMARK_PERIOD = 1000
 def sync_view(conn_info, stream, state, desired_columns, md_map):
     time_extracted = utils.now()
 
-    # before writing the table version to state, check if we had one to begin with
-    first_run = singer.get_bookmark(state, stream['tap_stream_id'], 'version') is None
     nascent_stream_version = int(time.time() * 1000)
 
     state = singer.write_bookmark(state,
@@ -29,16 +27,15 @@ def sync_view(conn_info, stream, state, desired_columns, md_map):
                                   nascent_stream_version)
     singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
 
-    schema_name = md_map.get(()).get('schema-name')
-
-    escaped_columns = map(post_db.prepare_columns_sql, desired_columns)
-
     activate_version_message = singer.ActivateVersionMessage(
         stream=post_db.calculate_destination_stream_name(stream, md_map),
         version=nascent_stream_version)
+    LOGGER.info("Activate version %s", nascent_stream_version)
+    singer.write_message(activate_version_message)
 
-    if first_run:
-        singer.write_message(activate_version_message)
+    schema_name = md_map.get(()).get('schema-name')
+
+    escaped_columns = map(post_db.prepare_columns_sql, desired_columns)
 
     with metrics.record_counter(None) as counter:
         with post_db.open_connection(conn_info) as conn:
@@ -64,9 +61,11 @@ def sync_view(conn_info, stream, state, desired_columns, md_map):
                         singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
 
                     counter.increment()
+            
+            LOGGER.info("CLOSE CONNECTION")
 
     # always send the activate version whether first run or subsequent
-    singer.write_message(activate_version_message)
+    # singer.write_message(activate_version_message)
 
     return state
 
@@ -75,15 +74,14 @@ def sync_view(conn_info, stream, state, desired_columns, md_map):
 def sync_table(conn_info, stream, state, desired_columns, md_map):
     time_extracted = utils.now()
 
-    # before writing the table version to state, check if we had one to begin with
-    first_run = singer.get_bookmark(state, stream['tap_stream_id'], 'version') is None
-
+    nascent_stream_version = singer.get_bookmark(state, stream['tap_stream_id'], 'version')
     # pick a new table version IFF we do not have an xmin in our state
     # the presence of an xmin indicates that we were interrupted last time through
     if singer.get_bookmark(state, stream['tap_stream_id'], 'xmin') is None:
         nascent_stream_version = int(time.time() * 1000)
+        first_run = True
     else:
-        nascent_stream_version = singer.get_bookmark(state, stream['tap_stream_id'], 'version')
+        first_run = False
 
     state = singer.write_bookmark(state,
                                   stream['tap_stream_id'],
@@ -91,16 +89,16 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                                   nascent_stream_version)
     singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
 
+    if first_run:
+        activate_version_message = singer.ActivateVersionMessage(
+            stream=post_db.calculate_destination_stream_name(stream, md_map),
+            version=nascent_stream_version)
+        LOGGER.info("Activate version %s", nascent_stream_version)
+        singer.write_message(activate_version_message)
+
     schema_name = md_map.get(()).get('schema-name')
 
     escaped_columns = map(partial(post_db.prepare_columns_for_select_sql, md_map=md_map), desired_columns)
-
-    activate_version_message = singer.ActivateVersionMessage(
-        stream=post_db.calculate_destination_stream_name(stream, md_map),
-        version=nascent_stream_version)
-
-    if first_run:
-        singer.write_message(activate_version_message)
 
     hstore_available = post_db.hstore_available(conn_info)
     with metrics.record_counter(None) as counter:
@@ -163,6 +161,6 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
     state = singer.write_bookmark(state, stream['tap_stream_id'], 'xmin', None)
 
     # always send the activate version whether first run or subsequent
-    singer.write_message(activate_version_message)
+    # singer.write_message(activate_version_message)
 
     return state

@@ -1,4 +1,5 @@
 import datetime
+import time
 import pytz
 import decimal
 import psycopg2
@@ -76,6 +77,17 @@ def int_to_lsn(lsni):
     return lsn
 
 
+def printable_lsn(pg_lsn=None, lsni=None):
+    if not pg_lsn and not lsni:
+        return None
+    elif not pg_lsn:
+        pg_lsn = int_to_lsn(lsni)
+    elif not lsni:
+        lsni = lsn_to_int(pg_lsn)
+
+    return f"{lsni} ({pg_lsn})"
+
+
 # pylint: disable=chained-comparison
 def fetch_current_lsn(conn_config):
     version = get_pg_version(conn_config)
@@ -103,6 +115,7 @@ def fetch_current_lsn(conn_config):
                 cur.execute("SELECT pg_current_xlog_location() AS current_lsn")
 
             current_lsn = cur.fetchone()[0]
+            LOGGER.debug('Current LSN: %s', printable_lsn(pg_lsn=current_lsn))
             return lsn_to_int(current_lsn)
 
 
@@ -425,7 +438,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
     # T = Truncate
     action = payload['action']
 
-    if action not in {'I', 'U', 'D'}:
+    if action not in {'I', 'U', 'D', 'T'}:
         raise UnsupportedPayloadKindError(f"unrecognized replication operation: {action}")
 
     # Get the additional fields in payload that are not in schema properties:
@@ -451,43 +464,93 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
     stream_version = get_stream_version(target_stream['tap_stream_id'], state)
     stream_md_map = metadata.to_map(target_stream['metadata'])
 
-    desired_columns = {c for c in target_stream['schema']['properties'].keys() if sync_common.should_sync_column(
-        stream_md_map, c)}
+    if action == 'T':
+        old_stream_version = stream_version
+        stream_version = int(time.time() * 1000)
 
-    col_names = []
-    col_vals = []
+        LOGGER.warning('Stream %s was truncated, old version %s, new version %s', target_stream['stream'], old_stream_version, stream_version)
 
-    if action in {'I', 'U'}:
-        for col in payload['columns']:
-            if col['name'] in desired_columns:
-                col_names.append(col['name'])
-                col_vals.append(col['value'])
+        state = singer.write_bookmark(state, target_stream['tap_stream_id'], 'version', stream_version)
+        singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
 
-        col_names.append('_sdc_deleted_at')
-        col_vals.append(None)
+        activate_version_message = singer.ActivateVersionMessage(
+            stream=post_db.calculate_destination_stream_name(target_stream, stream_md_map),
+            version=stream_version
+        )
+        LOGGER.info("Activate version %s", stream_version)
+        singer.write_message(activate_version_message)
+    else:
+        desired_columns = {c for c in target_stream['schema']['properties'].keys() if sync_common.should_sync_column(
+            stream_md_map, c)}
 
-    elif action == 'D':
-        for column in payload['identity']:
-            if column['name'] in set(desired_columns):
-                col_names.append(column['name'])
-                col_vals.append(column['value'])
+        col_names = []
+        col_vals = []
 
-        col_names.append('_sdc_deleted_at')
-        col_vals.append(singer.utils.strftime(time_extracted))
+        if action in {'I', 'U'}:
+            if action == 'U':
+                identities = {}
 
-    if conn_info.get('debug_lsn'):
-        col_names.append('_sdc_lsn')
-        col_vals.append(str(lsn))
+                for identity in payload['identity']:
+                    identities[identity['name']] = identity['value']
 
-    record_message = row_to_singer_message(target_stream,
-                                           col_vals,
-                                           stream_version,
-                                           col_names,
-                                           time_extracted,
-                                           stream_md_map,
-                                           conn_info)
+            for col in payload['columns']:
+                if col['name'] in desired_columns:
+                    col_names.append(col['name'])
+                    col_vals.append(col['value'])
 
-    singer.write_message(record_message)
+                    if action == 'U' and col['name'] in identities:
+                        if col['value'] != identities[col['name']]:
+                            LOGGER.warning('IDENTITY CHANGED: %s = %s -> %s', col['name'], identities[col['name']], col['value'])
+
+                            del_names = []
+                            del_vals = []
+
+                            for column in payload['identity']:
+                                if column['name'] in set(desired_columns):
+                                    del_names.append(column['name'])
+                                    del_vals.append(column['value'])
+
+                            del_names.append('_sdc_deleted_at')
+                            del_vals.append(payload['timestamp'])
+
+                            if conn_info.get('debug_lsn'):
+                                del_names.append('_sdc_lsn')
+                                del_vals.append(str(lsn))
+
+                            del_message = row_to_singer_message(target_stream,
+                                                                del_vals,
+                                                                stream_version,
+                                                                del_names,
+                                                                time_extracted,
+                                                                stream_md_map,
+                                                                conn_info)
+                            singer.write_message(del_message)
+
+            col_names.append('_sdc_deleted_at')
+            col_vals.append(None)
+
+        elif action == 'D':
+            for column in payload['identity']:
+                if column['name'] in set(desired_columns):
+                    col_names.append(column['name'])
+                    col_vals.append(column['value'])
+
+            col_names.append('_sdc_deleted_at')
+            col_vals.append(payload['timestamp'])
+
+        if conn_info.get('debug_lsn'):
+            col_names.append('_sdc_lsn')
+            col_vals.append(str(lsn))
+
+        record_message = row_to_singer_message(target_stream,
+                                            col_vals,
+                                            stream_version,
+                                            col_names,
+                                            time_extracted,
+                                            stream_md_map,
+                                            conn_info)
+        singer.write_message(record_message)
+
     state = singer.write_bookmark(state, target_stream['tap_stream_id'], 'lsn', lsn)
 
     return state
@@ -584,7 +647,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
     max_run_seconds = conn_info['max_run_seconds']
     break_at_end_lsn = conn_info['break_at_end_lsn']
     logical_poll_total_seconds = conn_info['logical_poll_total_seconds'] or 10800  # 3 hours
-    poll_interval = 10
+    poll_interval = 10 # if logical_poll_total_seconds > 10 else int(logical_poll_total_seconds / 2)
 
     for s in logical_streams:
         sync_common.send_schema_message(s, ['lsn'])
@@ -603,8 +666,8 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
 
     try:
         LOGGER.info('Request wal streaming from %s to %s (slot %s)',
-                    int_to_lsn(start_lsn),
-                    int_to_lsn(end_lsn),
+                    printable_lsn(lsni=start_lsn),
+                    printable_lsn(lsni=end_lsn),
                     slot)
         # psycopg2 2.8.4 will send a keep-alive message to postgres every status_interval
         cur.start_replication(slot_name=slot,
@@ -616,7 +679,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                                   'include-transaction': False,
                                   'include-timestamp': True,
                                   'include-types': False,
-                                  'actions': 'insert,update,delete',
+                                  'actions': 'insert,update,delete,truncate',
                                   'add-tables': streams_to_wal2json_tables(logical_streams)
                               })
 
@@ -648,8 +711,8 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
             if msg:
                 if (break_at_end_lsn) and (msg.data_start > end_lsn):
                     LOGGER.info('Breaking - latest wal message %s is past end_lsn %s',
-                                int_to_lsn(msg.data_start),
-                                int_to_lsn(end_lsn))
+                                printable_lsn(lsni=msg.data_start),
+                                printable_lsn(lsni=end_lsn))
                     break
 
                 state = consume_message(logical_streams, state, msg, time_extracted, conn_info)
@@ -658,15 +721,15 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                 # This is to ensure we only flush to lsn that has completed entirely
                 if lsn_currently_processing is None:
                     lsn_currently_processing = msg.data_start
-                    LOGGER.info('First wal message received is %s', int_to_lsn(lsn_currently_processing))
+                    LOGGER.info('First wal message received is %s', printable_lsn(lsni=lsn_currently_processing))
 
                     # Flush Postgres wal up to lsn comitted in previous run, or first lsn received in this run
                     lsn_to_flush = lsn_comitted
                     if lsn_currently_processing < lsn_to_flush:
                         lsn_to_flush = lsn_currently_processing
-                    LOGGER.info('Confirming write up to %s, flush to %s',
-                                int_to_lsn(lsn_to_flush),
-                                int_to_lsn(lsn_to_flush))
+                    LOGGER.info('Confirming (1) write up to %s, flush to %s',
+                                printable_lsn(lsni=lsn_to_flush),
+                                printable_lsn(lsni=lsn_to_flush))
                     cur.send_feedback(write_lsn=lsn_to_flush, flush_lsn=lsn_to_flush, reply=True, force=True)
 
                 elif int(msg.data_start) > lsn_currently_processing:
@@ -694,7 +757,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                 if lsn_currently_processing is None:
                     LOGGER.info('Waiting for first wal message')
                 else:
-                    LOGGER.info('Lastest wal message received was %s', int_to_lsn(lsn_last_processed))
+                    LOGGER.info('Lastest wal message received was %s', printable_lsn(lsni=lsn_last_processed))
                     try:
                         with open(state_file, mode="r", encoding="utf-8") as fh:
                             state_comitted = json.load(fh)
@@ -702,12 +765,12 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                         LOGGER.debug('Unable to open and parse %s', state_file)
                     finally:
                         lsn_comitted = min(
-                            [get_bookmark(state_comitted, s['tap_stream_id'], 'lsn') for s in logical_streams])
+                            [get_bookmark(state_comitted, s['tap_stream_id'], 'lsn', start_lsn) for s in logical_streams])
                         if (lsn_currently_processing > lsn_comitted) and (lsn_comitted > lsn_to_flush):
                             lsn_to_flush = lsn_comitted
-                            LOGGER.info('Confirming write up to %s, flush to %s',
-                                        int_to_lsn(lsn_to_flush),
-                                        int_to_lsn(lsn_to_flush))
+                            LOGGER.info('Confirming (2) write up to %s, flush to %s',
+                                        printable_lsn(lsni=lsn_to_flush),
+                                        printable_lsn(lsni=lsn_to_flush))
                             cur.send_feedback(write_lsn=lsn_to_flush, flush_lsn=lsn_to_flush, reply=True, force=True)
 
                 poll_timestamp = datetime.datetime.utcnow()
@@ -720,12 +783,11 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
             if lsn_comitted > lsn_last_processed:
                 lsn_last_processed = lsn_comitted
                 LOGGER.info('Current lsn_last_processed %s is older than lsn_comitted %s',
-                            int_to_lsn(lsn_last_processed),
-                            int_to_lsn(lsn_comitted))
+                            printable_lsn(lsni=lsn_last_processed),
+                            printable_lsn(lsni=lsn_comitted))
 
-            LOGGER.info('Updating bookmarks for all streams to lsn = %s (%s)',
-                        lsn_last_processed,
-                        int_to_lsn(lsn_last_processed))
+            LOGGER.info('Updating bookmarks for all streams to lsn = %s',
+                        printable_lsn(lsni=lsn_last_processed))
 
             for s in logical_streams:
                 state = singer.write_bookmark(state, s['tap_stream_id'], 'lsn', lsn_last_processed)
