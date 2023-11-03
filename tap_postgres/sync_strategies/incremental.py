@@ -36,10 +36,13 @@ def fetch_max_replication_key(conn_config, replication_key, schema_name, table_n
 def sync_table(conn_info, stream, state, desired_columns, md_map):
     time_extracted = utils.now()
 
+    nascent_stream_version = singer.get_bookmark(state, stream['tap_stream_id'], 'version')
     # before writing the table version to state, check if we had one to begin with
-    first_run = singer.get_bookmark(state, stream['tap_stream_id'], 'version') is None
-    if first_run:
+    if nascent_stream_version is None:
         nascent_stream_version = int(time.time() * 1000)
+        first_run = True
+    else:
+        first_run = False
 
     state = singer.write_bookmark(state,
                                   stream['tap_stream_id'],
