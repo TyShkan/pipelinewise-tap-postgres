@@ -594,7 +594,14 @@ def locate_replication_slot_by_cur(cursor, dbname, tap_id=None):
         LOGGER.info('Using pg_replication_slot %s', slot_name_v16)
         return slot_name_v16
 
-    raise ReplicationSlotNotFoundError(f'Unable to find replication slot {slot_name_v16}')
+    LOGGER.info('Unable to find replication slot %s, trying to create...', slot_name_v16)
+
+    cursor.execute(f"SELECT pg_create_logical_replication_slot('{slot_name_v16}', 'wal2json')")
+    if len(cursor.fetchall()) == 1:
+        LOGGER.info('Successfully created, now using pg_replication_slot %s', slot_name_v16)
+        return slot_name_v16
+
+    raise ReplicationSlotNotFoundError(f'Unable to find/create replication slot {slot_name_v16}')
 
 
 def locate_replication_slot(conn_info):
