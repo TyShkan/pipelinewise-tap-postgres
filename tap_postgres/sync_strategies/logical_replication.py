@@ -654,7 +654,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
     max_run_seconds = conn_info['max_run_seconds']
     break_at_end_lsn = conn_info['break_at_end_lsn']
     logical_poll_total_seconds = conn_info['logical_poll_total_seconds'] or 10800  # 3 hours
-    poll_interval = 10 # if logical_poll_total_seconds > 10 else int(logical_poll_total_seconds / 2)
+    poll_interval = 10 if logical_poll_total_seconds > 10 else int(logical_poll_total_seconds / 2)
 
     for s in logical_streams:
         sync_common.send_schema_message(s, ['lsn'])
