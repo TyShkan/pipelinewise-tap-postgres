@@ -177,7 +177,7 @@ def sync_traditional_stream(conn_config, stream, state, sync_method, end_lsn):
         state = do_sync_incremental(conn_config, stream, state, desired_columns, md_map)
     elif sync_method == 'logical_initial':
         state = singer.set_currently_syncing(state, stream['tap_stream_id'])
-        LOGGER.info("Performing initial full table sync")
+        LOGGER.info('Performing initial full table sync, current lsn %s', logical_replication.printable_lsn(lsni=end_lsn))
         state = singer.write_bookmark(state, stream['tap_stream_id'], 'lsn', end_lsn)
 
         sync_common.send_schema_message(stream, [])
@@ -189,7 +189,7 @@ def sync_traditional_stream(conn_config, stream, state, sync_method, end_lsn):
         sync_common.send_schema_message(stream, [])
         state = full_table.sync_table(conn_config, stream, state, desired_columns, md_map)
     else:
-        raise Exception(f"unknown sync method {sync_method} for stream {stream['tap_stream_id']}")
+        raise Exception(f"Unknown sync method {sync_method} for stream {stream['tap_stream_id']}")
 
     state = singer.set_currently_syncing(state, None)
     singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
@@ -207,7 +207,7 @@ def sync_logical_streams(conn_config, logical_streams, state, end_lsn, state_fil
         logical_streams = [logical_replication.add_automatic_properties(
             s, conn_config.get('debug_lsn', False)) for s in logical_streams]
 
-        LOGGER.info('debug_lsn = %s', conn_config.get('debug_lsn'))
+        LOGGER.debug('debug_lsn = %s', conn_config.get('debug_lsn'))
 
         # Remove LOG_BASED stream bookmarks from state if it has been de-selected
         # This is to avoid sending very old starting and flushing positions to source

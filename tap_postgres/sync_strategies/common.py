@@ -32,3 +32,27 @@ def send_schema_message(stream, bookmark_properties):
                       'bookmark_properties': bookmark_properties}
 
     write_schema_message(schema_message)
+
+def size_bytes_to_human(num: int) -> str:
+    if not num or num == 0:
+        return '0B'
+
+    base = 1
+
+    for unit in ['B', 'Kb', 'Mb']:
+        n = num / base
+
+        if n < 9.95 and unit != 'B':
+            # Less than 10 then keep 1 decimal place
+            value = "{:.1f}{}".format(n, unit)
+            return value
+
+        if round(n) < 1000:
+            # Less than 4 digits so use this
+            value = "{}{}".format(round(n), unit)
+            return value
+
+        base *= 1024
+
+    value = "{}{}".format(round(n), unit)
+    return value
