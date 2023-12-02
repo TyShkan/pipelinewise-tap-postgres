@@ -18,6 +18,7 @@ from functools import reduce
 import tap_postgres.db as post_db
 import tap_postgres.sync_strategies.common as sync_common
 from tap_postgres.stream_utils import refresh_streams_schema
+from tap_postgres.metrics import record_counter_dynamic
 
 LOGGER = singer.get_logger('tap_postgres')
 
@@ -406,6 +407,16 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
 
     target_stream = streams_lookup[tap_stream_id]
 
+    stat = {
+        "stream": target_stream,
+        "counters": {
+            "inserted": 0,
+            "updated": 0,
+            "deleted": 0,
+            "truncated": 0,
+        }
+    }
+
     # Example of Insert payload:
     # {
     #   "action":"I",
@@ -477,8 +488,9 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
             stream=post_db.calculate_destination_stream_name(target_stream, stream_md_map),
             version=stream_version
         )
-        LOGGER.info("Activate version %s", stream_version)
+        LOGGER.info("ACTIVATE VERSION: %s", stream_version)
         singer.write_message(activate_version_message)
+        stat["truncated"] += 1
     else:
         desired_columns = {c for c in target_stream['schema']['properties'].keys() if sync_common.should_sync_column(
             stream_md_map, c)}
@@ -492,6 +504,10 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
 
                 for identity in payload['identity']:
                     identities[identity['name']] = identity['value']
+
+                stat["updated"] += 1
+            else:
+                stat["inserted"] += 1
 
             for col in payload['columns']:
                 if col['name'] in desired_columns:
@@ -525,6 +541,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
                                                                 stream_md_map,
                                                                 conn_info)
                             singer.write_message(del_message)
+                            stat["deleted"] += 1
 
             col_names.append('_sdc_deleted_at')
             col_vals.append(None)
@@ -537,6 +554,8 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
 
             col_names.append('_sdc_deleted_at')
             col_vals.append(payload['timestamp'])
+
+            stat["deleted"] += 1
 
         if conn_info.get('debug_lsn'):
             col_names.append('_sdc_lsn')
@@ -553,7 +572,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
 
     state = singer.write_bookmark(state, target_stream['tap_stream_id'], 'lsn', lsn)
 
-    return state
+    return state, stat
 
 
 def generate_replication_slot_name(dbname, tap_id=None, prefix='pipelinewise'):
@@ -675,32 +694,34 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
         if end_lsn and start_lsn:
             lsn_total_bytes = end_lsn - start_lsn
 
-        LOGGER.info('Request wal streaming from %s %s(slot %s, %s sec interval, %s%s)',
-                    printable_lsn(lsni=start_lsn),
-                    f"to {printable_lsn(lsni=end_lsn)} " if break_at_end_lsn else '',
-                    slot,
-                    poll_interval,
-                    sync_common.size_bytes_to_human(lsn_total_bytes),
-                    '' if break_at_end_lsn else '+'
+        LOGGER.info(
+            'Request wal streaming from %s %s(slot %s, %s sec interval, %s%s)',
+            printable_lsn(lsni=start_lsn),
+            f"to {printable_lsn(lsni=end_lsn)} " if break_at_end_lsn else '',
+            slot,
+            poll_interval,
+            sync_common.size_bytes_to_human(lsn_total_bytes),
+            '' if break_at_end_lsn else '+'
         )
-        
-        # psycopg2 2.8.4 will send a keep-alive message to postgres every status_interval
-        cur.start_replication(slot_name=slot,
-                              decode=True,
-                              start_lsn=start_lsn,
-                              status_interval=poll_interval,
-                              options={
-                                  'format-version': 2,
-                                  'include-transaction': False,
-                                  'include-timestamp': True,
-                                  'include-types': False,
-                                  'include-lsn': True,
-                                  'actions': 'insert,update,delete,truncate',
-                                  'add-tables': streams_to_wal2json_tables(logical_streams)
-                              })
 
-    except psycopg2.ProgrammingError as ex:
-        raise Exception(f"Unable to start replication with logical replication (slot {ex})") from ex
+        # psycopg2 2.8.4 will send a keep-alive message to postgres every status_interval
+        cur.start_replication(
+            slot_name=slot,
+            decode=True,
+            start_lsn=start_lsn,
+            status_interval=poll_interval,
+            options={
+                'format-version': 2,
+                'include-transaction': False,
+                'include-timestamp': True,
+                'include-types': False,
+                'include-lsn': True,
+                'actions': 'insert,update,delete,truncate',
+                'add-tables': streams_to_wal2json_tables(logical_streams)
+            }
+        )
+    except psycopg2.Error as e:
+        raise Exception(f"Can't start replication: {e.diag.message_primary}")
 
     if start_lsn:
         LOGGER.info('Confirming write and flush up to previously comitted %s', printable_lsn(lsni=start_lsn))
@@ -712,88 +733,99 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
     lsn_received_timestamp = datetime.datetime.utcnow()
     poll_timestamp = datetime.datetime.utcnow()
 
-    try:
-        while True:
-            poll_duration = (datetime.datetime.utcnow() - lsn_received_timestamp).total_seconds()
-            if poll_duration > logical_poll_total_seconds:
-                LOGGER.info('Breaking - %i secs of polling with no data', poll_duration)
-                break
-
-            if datetime.datetime.utcnow() >= (start_run_timestamp + datetime.timedelta(seconds=max_run_seconds)):
-                LOGGER.info('Breaking - reached max_run_seconds of %i', max_run_seconds)
-                break
-
-            try:
-                msg = cur.read_message()
-            except Exception as e:
-                LOGGER.error(e)
-                raise
-
-            lsn_last_received = cur.wal_end
-
-            if break_at_end_lsn and lsn_last_received > end_lsn:
-                LOGGER.info('Breaking - latest received lsn %s is past end_lsn %s', printable_lsn(lsni=lsn_last_received), printable_lsn(lsni=end_lsn))
-                break
-
-            if msg:
-                if msg.data_start <= start_lsn:
-                    LOGGER.debug('SKIP, before start_lsn: %s, payload: %s', printable_lsn(lsni=msg.data_start), msg.payload)
-                    lsn_skipped_count += 1
-                    continue
-
-                if break_at_end_lsn and msg.data_start > end_lsn:
-                    LOGGER.info('Breaking - latest message received lsn %s is past end_lsn %s', printable_lsn(lsni=msg.data_start), printable_lsn(lsni=end_lsn))
+    with record_counter_dynamic() as counter:
+        try:
+            while True:
+                poll_duration = (datetime.datetime.utcnow() - lsn_received_timestamp).total_seconds()
+                if poll_duration > logical_poll_total_seconds:
+                    LOGGER.info('Breaking - %i secs of polling with no data', poll_duration)
                     break
-                
-                lsn_received_timestamp = datetime.datetime.utcnow()
 
-                LOGGER.debug('MSG: data_start %s, wal_end %s, payload %s', printable_lsn(lsni=msg.data_start), printable_lsn(lsni=msg.wal_end), msg.payload)
+                if datetime.datetime.utcnow() >= (start_run_timestamp + datetime.timedelta(seconds=max_run_seconds)):
+                    LOGGER.info('Breaking - reached max_run_seconds of %i', max_run_seconds)
+                    break
 
-                state = consume_message(logical_streams, state, msg, time_extracted, conn_info)
-
-                lsn_last_processed = msg.data_start
-                lsn_processed_count += 1
-
-                if lsn_processed_count % UPDATE_BOOKMARK_PERIOD == 0:
-                    LOGGER.info('Processed %i messages, updating bookmarks for all streams to last processed lsn %s', lsn_processed_count, printable_lsn(lsni=lsn_last_processed))
-                    for s in logical_streams:
-                        state = singer.write_bookmark(state, s['tap_stream_id'], 'lsn', lsn_last_processed)
-                    singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
-                    LOGGER.info('Confirming write up to %s', printable_lsn(lsni=lsn_last_processed))
-                    cur.send_feedback(write_lsn=lsn_last_processed, reply=True, force=True)
-                    lsn_last_write = lsn_last_processed
-            else:
                 try:
-                    # Wait for a second unless a message arrives
-                    select([cur], [], [], 1)
-                except InterruptedError:
-                    pass
+                    msg = cur.read_message()
+                except Exception as e:
+                    LOGGER.error(e)
+                    raise
 
-            # Every poll_interval, update latest comitted lsn position from the state_file
-            if datetime.datetime.utcnow() >= (poll_timestamp + datetime.timedelta(seconds=poll_interval)):
                 lsn_last_received = cur.wal_end
 
-                if lsn_last_processed is None:
-                    LOGGER.info('Waiting for first wal message')
+                if break_at_end_lsn and lsn_last_received > end_lsn:
+                    LOGGER.info('Breaking - latest received lsn %s is past end_lsn %s', printable_lsn(lsni=lsn_last_received), printable_lsn(lsni=end_lsn))
+                    break
 
-                    if lsn_last_received > lsn_last_write or lsn_last_received > lsn_last_flush:
-                        LOGGER.info('Confirming write and flush up to last received %s', printable_lsn(lsni=lsn_last_received))
-                        cur.send_feedback(write_lsn=lsn_last_received, flush_lsn=lsn_last_received, reply=True, force=True)
-                        lsn_last_write = lsn_last_received
-                        lsn_last_flush = lsn_last_received
-                else:
-                    lsn_comitted = min([get_bookmark(state, s['tap_stream_id'], 'lsn', start_lsn) for s in logical_streams])
-                    LOGGER.info('Latest wal message processed was %s, comitted: %s, received %s', printable_lsn(lsni=lsn_last_processed), printable_lsn(lsni=lsn_comitted), printable_lsn(lsni=lsn_last_received))
+                if msg:
+                    if msg.data_start <= start_lsn:
+                        LOGGER.debug('SKIP, before start_lsn: %s, payload: %s', printable_lsn(lsni=msg.data_start), msg.payload)
+                        lsn_skipped_count += 1
+                        continue
 
-                    if lsn_last_processed > lsn_comitted and lsn_comitted > start_lsn and lsn_last_processed > lsn_last_write:
-                        LOGGER.info('Confirming write up to latest processed %s', printable_lsn(lsni=lsn_last_processed))
+                    if break_at_end_lsn and msg.data_start > end_lsn:
+                        LOGGER.info('Breaking - latest message received lsn %s is past end_lsn %s', printable_lsn(lsni=msg.data_start), printable_lsn(lsni=end_lsn))
+                        break
+
+                    lsn_received_timestamp = datetime.datetime.utcnow()
+
+                    LOGGER.debug('MSG: data_start %s, wal_end %s, payload %s', printable_lsn(lsni=msg.data_start), printable_lsn(lsni=msg.wal_end), msg.payload)
+
+                    state, stat = consume_message(logical_streams, state, msg, time_extracted, conn_info)
+
+                    if stat:
+                        endpoint = stat["stream"]
+                        for metric, amount in stat["counters"].items():
+                            if amount > 0:
+                                counter.increment(
+                                    endpoint=endpoint,
+                                    metric_type=metric,
+                                    amount=amount
+                                )
+
+                    lsn_last_processed = msg.data_start
+                    lsn_processed_count += 1
+
+                    if lsn_processed_count % UPDATE_BOOKMARK_PERIOD == 0:
+                        LOGGER.info('Processed %i messages, updating bookmarks for all streams to last processed lsn %s', lsn_processed_count, printable_lsn(lsni=lsn_last_processed))
+                        for s in logical_streams:
+                            state = singer.write_bookmark(state, s['tap_stream_id'], 'lsn', lsn_last_processed)
+                        singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
+                        LOGGER.info('Confirming write up to %s', printable_lsn(lsni=lsn_last_processed))
                         cur.send_feedback(write_lsn=lsn_last_processed, reply=True, force=True)
                         lsn_last_write = lsn_last_processed
+                else:
+                    try:
+                        # Wait for a second unless a message arrives
+                        select([cur], [], [], 1)
+                    except InterruptedError:
+                        pass
 
-                poll_timestamp = datetime.datetime.utcnow()
-    finally:
-        pass
-    
+                # Every poll_interval, update latest comitted lsn position from the state_file
+                if datetime.datetime.utcnow() >= (poll_timestamp + datetime.timedelta(seconds=poll_interval)):
+                    lsn_last_received = cur.wal_end
+
+                    if lsn_last_processed is None:
+                        LOGGER.info('Waiting for first wal message')
+
+                        if lsn_last_received > lsn_last_write or lsn_last_received > lsn_last_flush:
+                            LOGGER.info('Confirming write and flush up to last received %s', printable_lsn(lsni=lsn_last_received))
+                            cur.send_feedback(write_lsn=lsn_last_received, flush_lsn=lsn_last_received, reply=True, force=True)
+                            lsn_last_write = lsn_last_received
+                            lsn_last_flush = lsn_last_received
+                    else:
+                        lsn_comitted = min([get_bookmark(state, s['tap_stream_id'], 'lsn', start_lsn) for s in logical_streams])
+                        LOGGER.info('Latest wal message processed was %s, comitted: %s, received %s', printable_lsn(lsni=lsn_last_processed), printable_lsn(lsni=lsn_comitted), printable_lsn(lsni=lsn_last_received))
+
+                        if lsn_last_processed > lsn_comitted and lsn_comitted > start_lsn and lsn_last_processed > lsn_last_write:
+                            LOGGER.info('Confirming write up to latest processed %s', printable_lsn(lsni=lsn_last_processed))
+                            cur.send_feedback(write_lsn=lsn_last_processed, reply=True, force=True)
+                            lsn_last_write = lsn_last_processed
+
+                    poll_timestamp = datetime.datetime.utcnow()
+        finally:
+            pass
+
     lsn_last_received = cur.wal_end
 
     LOGGER.debug('SKIPPED %i, PROCESSED %i MESSAGES, LAST PROCESSED LSN: %s, LAST RECEIVED LSN: %s', lsn_skipped_count, lsn_processed_count, printable_lsn(lsni=lsn_last_processed), printable_lsn(lsni=lsn_last_received))

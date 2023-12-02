@@ -6,7 +6,7 @@ import singer
 
 from functools import partial
 from singer import utils
-from singer import metrics
+from tap_postgres.metrics import record_counter_dynamic
 
 import tap_postgres.db as post_db
 
@@ -27,17 +27,19 @@ def sync_view(conn_info, stream, state, desired_columns, md_map):
                                   nascent_stream_version)
     singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
 
-    activate_version_message = singer.ActivateVersionMessage(
-        stream=post_db.calculate_destination_stream_name(stream, md_map),
-        version=nascent_stream_version)
-    LOGGER.info("Activate version %s", nascent_stream_version)
-    singer.write_message(activate_version_message)
-
+    full_stream_name = post_db.calculate_destination_stream_name(stream, md_map)
     schema_name = md_map.get(()).get('schema-name')
 
     escaped_columns = map(post_db.prepare_columns_sql, desired_columns)
 
-    with metrics.record_counter(None) as counter:
+    with record_counter_dynamic() as counter:
+        activate_version_message = singer.ActivateVersionMessage(
+            stream=full_stream_name,
+            version=nascent_stream_version)
+        LOGGER.info("ACTIVATE VERSION: %s", nascent_stream_version)
+        singer.write_message(activate_version_message)
+        counter.increment(endpoint=full_stream_name, metric_type="truncated")
+
         with post_db.open_connection(conn_info) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name='stitch_cursor') as cur:
                 cur.itersize = post_db.CURSOR_ITER_SIZE
@@ -48,6 +50,7 @@ def sync_view(conn_info, stream, state, desired_columns, md_map):
                 cur.execute(select_sql)
 
                 rows_saved = 0
+
                 for rec in cur:
                     record_message = post_db.selected_row_to_singer_message(stream,
                                                                             rec,
@@ -57,11 +60,12 @@ def sync_view(conn_info, stream, state, desired_columns, md_map):
                                                                             md_map)
                     singer.write_message(record_message)
                     rows_saved += 1
+                    counter.increment(endpoint=full_stream_name)
+                    counter.increment(endpoint=full_stream_name, metric_type="inserted")
+
                     if rows_saved % UPDATE_BOOKMARK_PERIOD == 0:
                         singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
 
-                    counter.increment()
-            
             LOGGER.info("CLOSE CONNECTION")
 
     # always send the activate version whether first run or subsequent
@@ -89,19 +93,22 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                                   nascent_stream_version)
     singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
 
-    if first_run:
-        activate_version_message = singer.ActivateVersionMessage(
-            stream=post_db.calculate_destination_stream_name(stream, md_map),
-            version=nascent_stream_version)
-        LOGGER.info("Activate version %s", nascent_stream_version)
-        singer.write_message(activate_version_message)
-
+    full_stream_name = post_db.calculate_destination_stream_name(stream, md_map)
     schema_name = md_map.get(()).get('schema-name')
 
     escaped_columns = map(partial(post_db.prepare_columns_for_select_sql, md_map=md_map), desired_columns)
 
     hstore_available = post_db.hstore_available(conn_info)
-    with metrics.record_counter(None) as counter:
+
+    with record_counter_dynamic() as counter:
+        if first_run:
+            activate_version_message = singer.ActivateVersionMessage(
+                stream=full_stream_name,
+                version=nascent_stream_version)
+            LOGGER.info("ACTIVATE VERSION: %s", nascent_stream_version)
+            singer.write_message(activate_version_message)
+            counter.increment(endpoint=full_stream_name, metric_type="truncated")
+
         with post_db.open_connection(conn_info) as conn:
 
             # Client side character encoding defaults to the value in postgresql.conf under client_encoding.
@@ -139,6 +146,7 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                 cur.execute(select_sql)
 
                 rows_saved = 0
+
                 for rec in cur:
                     xmin = rec['xmin']
                     rec = rec[:-1]
@@ -151,10 +159,11 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                     singer.write_message(record_message)
                     state = singer.write_bookmark(state, stream['tap_stream_id'], 'xmin', xmin)
                     rows_saved += 1
+                    counter.increment(endpoint=full_stream_name)
+                    counter.increment(endpoint=full_stream_name, metric_type="inserted")
+
                     if rows_saved % UPDATE_BOOKMARK_PERIOD == 0:
                         singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
-
-                    counter.increment()
 
     # once we have completed the full table replication, discard the xmin bookmark.
     # the xmin bookmark only comes into play when a full table replication is interrupted
