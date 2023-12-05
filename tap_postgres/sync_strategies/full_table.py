@@ -38,7 +38,7 @@ def sync_view(conn_info, stream, state, desired_columns, md_map):
             version=nascent_stream_version)
         LOGGER.info("ACTIVATE VERSION: %s", nascent_stream_version)
         singer.write_message(activate_version_message)
-        counter.increment(endpoint=full_stream_name, metric_type="truncated")
+        counter.increment(endpoint=stream['tap_stream_id'], metric_type="truncated")
 
         with post_db.open_connection(conn_info) as conn:
             with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name='stitch_cursor') as cur:
@@ -60,8 +60,8 @@ def sync_view(conn_info, stream, state, desired_columns, md_map):
                                                                             md_map)
                     singer.write_message(record_message)
                     rows_saved += 1
-                    counter.increment(endpoint=full_stream_name)
-                    counter.increment(endpoint=full_stream_name, metric_type="inserted")
+                    counter.increment(endpoint=stream['tap_stream_id'])
+                    counter.increment(endpoint=stream['tap_stream_id'], metric_type="inserted")
 
                     if rows_saved % UPDATE_BOOKMARK_PERIOD == 0:
                         singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
@@ -107,7 +107,7 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                 version=nascent_stream_version)
             LOGGER.info("ACTIVATE VERSION: %s", nascent_stream_version)
             singer.write_message(activate_version_message)
-            counter.increment(endpoint=full_stream_name, metric_type="truncated")
+            counter.increment(endpoint=stream['tap_stream_id'], metric_type="truncated")
 
         with post_db.open_connection(conn_info) as conn:
 
@@ -159,8 +159,8 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                     singer.write_message(record_message)
                     state = singer.write_bookmark(state, stream['tap_stream_id'], 'xmin', xmin)
                     rows_saved += 1
-                    counter.increment(endpoint=full_stream_name)
-                    counter.increment(endpoint=full_stream_name, metric_type="inserted")
+                    counter.increment(endpoint=stream['tap_stream_id'])
+                    counter.increment(endpoint=stream['tap_stream_id'], metric_type="inserted")
 
                     if rows_saved % UPDATE_BOOKMARK_PERIOD == 0:
                         singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))

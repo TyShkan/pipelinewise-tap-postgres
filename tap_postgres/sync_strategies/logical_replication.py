@@ -408,7 +408,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
     target_stream = streams_lookup[tap_stream_id]
 
     stat = {
-        "stream": target_stream,
+        "stream": tap_stream_id,
         "counters": {
             "inserted": 0,
             "updated": 0,
@@ -490,7 +490,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
         )
         LOGGER.info("ACTIVATE VERSION: %s", stream_version)
         singer.write_message(activate_version_message)
-        stat["truncated"] += 1
+        stat["counters"]["truncated"] += 1
     else:
         desired_columns = {c for c in target_stream['schema']['properties'].keys() if sync_common.should_sync_column(
             stream_md_map, c)}
@@ -505,9 +505,9 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
                 for identity in payload['identity']:
                     identities[identity['name']] = identity['value']
 
-                stat["updated"] += 1
+                stat["counters"]["updated"] += 1
             else:
-                stat["inserted"] += 1
+                stat["counters"]["inserted"] += 1
 
             for col in payload['columns']:
                 if col['name'] in desired_columns:
@@ -541,7 +541,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
                                                                 stream_md_map,
                                                                 conn_info)
                             singer.write_message(del_message)
-                            stat["deleted"] += 1
+                            stat["counters"]["deleted"] += 1
 
             col_names.append('_sdc_deleted_at')
             col_vals.append(None)
@@ -555,7 +555,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
             col_names.append('_sdc_deleted_at')
             col_vals.append(payload['timestamp'])
 
-            stat["deleted"] += 1
+            stat["counters"]["deleted"] += 1
 
         if conn_info.get('debug_lsn'):
             col_names.append('_sdc_lsn')
@@ -721,7 +721,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
             }
         )
     except psycopg2.Error as e:
-        raise Exception(f"Can't start replication: {e.diag.message_primary}")
+        raise RuntimeError(f"Can't start replication: {e.diag.message_primary}. {e.diag.message_detail}")
 
     if start_lsn:
         LOGGER.info('Confirming write and flush up to previously comitted %s', printable_lsn(lsni=start_lsn))
@@ -737,7 +737,10 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
         try:
             while True:
                 poll_duration = (datetime.datetime.utcnow() - lsn_received_timestamp).total_seconds()
-                if poll_duration > logical_poll_total_seconds:
+                if (
+                    not break_at_end_lsn
+                    or break_at_end_lsn and lsn_last_received and lsn_last_received <= end_lsn
+                ) and poll_duration > logical_poll_total_seconds:
                     LOGGER.info('Breaking - %i secs of polling with no data', poll_duration)
                     break
 
@@ -782,6 +785,12 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                                     metric_type=metric,
                                     amount=amount
                                 )
+
+                                if metric in {"inserted", "updated", "deleted"}:
+                                    counter.increment(
+                                        endpoint=endpoint,
+                                        amount=amount
+                                    )
 
                     lsn_last_processed = msg.data_start
                     lsn_processed_count += 1

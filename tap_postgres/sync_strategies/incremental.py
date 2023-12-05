@@ -68,7 +68,7 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                 version=nascent_stream_version)
             LOGGER.info("ACTIVATE VERSION: %s", nascent_stream_version)
             singer.write_message(activate_version_message)
-            counter.increment(endpoint=full_stream_name, metric_type="truncated")
+            counter.increment(endpoint=stream['tap_stream_id'], metric_type="truncated")
 
         with post_db.open_connection(conn_info) as conn:
 
@@ -111,8 +111,8 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
                                                                             md_map)
                     singer.write_message(record_message)
                     rows_saved += 1
-                    counter.increment(endpoint=full_stream_name)
-                    counter.increment(endpoint=full_stream_name, metric_type="inserted")
+                    counter.increment(endpoint=stream['tap_stream_id'])
+                    counter.increment(endpoint=stream['tap_stream_id'], metric_type="inserted")
 
                     # Picking a replication_key with NULL values will result in it ALWAYS been synced which is not great
                     # event worse would be allowing the NULL value to enter into the state
