@@ -27,13 +27,13 @@ class PostgresCurReplicationSlotMock:
     def execute(self, sql):
         """Simulating to run an SQL query
         If the query is selecting the existing_slot_name then the replication slot found"""
-        if sql == f"SELECT * FROM pg_replication_slots WHERE slot_name = '{self.existing_slot_name}'":
+        if sql == f"SELECT wal_status FROM pg_replication_slots WHERE slot_name = '{self.existing_slot_name}'":
             self.replication_slot_found = True
 
     def fetchall(self):
-        """Return the replication slot name as a List if the slot exists."""
+        """Return the replication slot wal_status=reserved as a List if the slot exists."""
         if self.replication_slot_found:
-            return [self.existing_slot_name]
+            return ["reserved"]
 
         return []
 

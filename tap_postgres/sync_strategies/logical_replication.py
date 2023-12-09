@@ -597,34 +597,79 @@ def generate_replication_slot_name(dbname, tap_id=None, prefix='pipelinewise'):
     return re.sub('[^a-z0-9_]', '_', slot_name)
 
 
-def locate_replication_slot_by_cur(cursor, dbname, tap_id=None):
+def locate_replication_slot_by_cur(cursor, dbname, tap_id=None, return_status=None):
     slot_name_v15 = generate_replication_slot_name(dbname)
     slot_name_v16 = generate_replication_slot_name(dbname, tap_id)
 
+    cursor.execute(f"SELECT wal_status FROM pg_replication_slots WHERE slot_name = '{slot_name_v16}'")
+    result = cursor.fetchall()
+    if len(result) == 1:
+        if return_status:
+            wal_status = result[0][0]
+            return slot_name_v16, wal_status
+        else:
+            return slot_name_v16
+
     # Backward compatibility: try to locate existing v15 slot first. PPW <= 0.15.0
-    cursor.execute(f"SELECT * FROM pg_replication_slots WHERE slot_name = '{slot_name_v15}'")
-    if len(cursor.fetchall()) == 1:
-        return slot_name_v15
+    cursor.execute(f"SELECT wal_status FROM pg_replication_slots WHERE slot_name = '{slot_name_v15}'")
+    result = cursor.fetchall()
+    if len(result) == 1:
+        if return_status:
+            wal_status = result[0][0]
+            return slot_name_v15, wal_status
+        else:
+            return slot_name_v15
 
-    # v15 style replication slot not found, try to locate v16
-    cursor.execute(f"SELECT * FROM pg_replication_slots WHERE slot_name = '{slot_name_v16}'")
-    if len(cursor.fetchall()) == 1:
-        return slot_name_v16
-
-    LOGGER.info('Unable to find replication slot %s, trying to create...', slot_name_v16)
-
-    cursor.execute(f"SELECT pg_create_logical_replication_slot('{slot_name_v16}', 'wal2json')")
-    if len(cursor.fetchall()) == 1:
-        LOGGER.info('Successfully created, now using pg_replication_slot %s', slot_name_v16)
-        return slot_name_v16
-
-    raise ReplicationSlotNotFoundError(f'Unable to find/create replication slot {slot_name_v16}')
+    raise ReplicationSlotNotFoundError(f'Unable to locate replication slot {slot_name_v16}')
 
 
-def locate_replication_slot(conn_info):
+def locate_replication_slot(conn_info, return_status=None):
     with post_db.open_connection(conn_info, False, True) as conn:
         with conn.cursor() as cur:
-            return locate_replication_slot_by_cur(cur, conn_info['dbname'], conn_info['tap_id'])
+            return locate_replication_slot_by_cur(cur, conn_info['dbname'], conn_info['tap_id'], return_status=return_status)
+
+
+def create_replication_slot_by_cur(cursor, dbname, tap_id=None):
+    slot_name = generate_replication_slot_name(dbname, tap_id)
+
+    try:
+        cursor.execute(f"SELECT pg_create_logical_replication_slot('{slot_name}', 'wal2json')")
+
+        LOGGER.info(f"Successfully created replication slot {slot_name}")
+        return slot_name
+    except psycopg2.Error as e:
+        raise RuntimeError(f"Can't create replication slot {slot_name}: {e.diag.message_primary}. {e.diag.message_detail}")
+
+
+def create_replication_slot(conn_info):
+    with post_db.open_connection(conn_info, False, True) as conn:
+        with conn.cursor() as cur:
+            return create_replication_slot_by_cur(cur, conn_info['dbname'], conn_info['tap_id'])
+
+
+def drop_replication_slot_by_cur(cursor, dbname, tap_id=None):
+    try:
+        slot_name = locate_replication_slot_by_cur(cursor, dbname, tap_id)
+    except ReplicationSlotNotFoundError:
+        LOGGER.info(f"Replication slot {slot_name} is not exists")
+        return True
+
+    try:
+        cursor.execute(f"SELECT pg_drop_replication_slot('{slot_name}')")
+
+        if len(cursor.fetchall()) == 1:
+            LOGGER.info(f"Successfully dropped replication slot {slot_name}")
+            return True
+        else:
+            return False
+    except psycopg2.Error as e:
+        raise RuntimeError(f"Can't drop replication slot {slot_name}: {e.diag.message_primary}. {e.diag.message_detail}")
+
+
+def drop_replication_slot(conn_info):
+    with post_db.open_connection(conn_info, False, True) as conn:
+        with conn.cursor() as cur:
+            return drop_replication_slot_by_cur(cur, conn_info['dbname'], conn_info['tap_id'])
 
 
 # pylint: disable=anomalous-backslash-in-string

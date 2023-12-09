@@ -180,12 +180,23 @@ def sync_traditional_stream(conn_config, stream, state, sync_method, end_lsn):
         LOGGER.info('Performing initial full table sync, current lsn %s', logical_replication.printable_lsn(lsni=end_lsn))
         state = singer.write_bookmark(state, stream['tap_stream_id'], 'lsn', end_lsn)
 
+        try:
+            replication_slot_name, replication_slot_status = logical_replication.locate_replication_slot(conn_config, return_status=True)
+        except logical_replication.ReplicationSlotNotFoundError:
+            logical_replication.create_replication_slot(conn_config)
+            replication_slot_status = "new"
+
+        if conn_config["recreate_slot_if_lost"] and replication_slot_status == "lost":
+            LOGGER.info(f"Replication slot has status '{replication_slot_status}', attempting to recreate it...")
+            logical_replication.drop_replication_slot(conn_config)
+            logical_replication.create_replication_slot(conn_config)
+
         sync_common.send_schema_message(stream, [])
         state = full_table.sync_table(conn_config, stream, state, desired_columns, md_map)
         state = singer.write_bookmark(state, stream['tap_stream_id'], 'xmin', None)
     elif sync_method == 'logical_initial_interrupted':
         state = singer.set_currently_syncing(state, stream['tap_stream_id'])
-        LOGGER.info("Initial stage of full table sync was interrupted. resuming...")
+        LOGGER.info("Initial stage of full table sync was interrupted. Resuming...")
         sync_common.send_schema_message(stream, [])
         state = full_table.sync_table(conn_config, stream, state, desired_columns, md_map)
     else:
@@ -412,6 +423,7 @@ def main_impl():
         'max_run_seconds': args.config.get('max_run_seconds', 43200),
         'break_at_end_lsn': args.config.get('break_at_end_lsn', True),
         'logical_poll_total_seconds': float(args.config.get('logical_poll_total_seconds', 0)),
+        'recreate_slot_if_lost': args.config.get('recreate_slot_if_lost', False),
         'use_secondary': args.config.get('use_secondary', False),
         'limit': int(limit) if limit else None
     }
@@ -428,7 +440,7 @@ def main_impl():
                 "When 'use_secondary' enabled 'secondary_host' and 'secondary_port' must be defined."
             ) from exc
 
-    if args.config.get('ssl') == 'true':
+    if args.config.get('ssl') is True:
         conn_config['sslmode'] = 'require'
 
     post_db.CURSOR_ITER_SIZE = int(args.config.get('itersize', post_db.CURSOR_ITER_SIZE))
