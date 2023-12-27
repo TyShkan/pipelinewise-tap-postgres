@@ -784,7 +784,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                 poll_duration = (datetime.datetime.utcnow() - lsn_received_timestamp).total_seconds()
                 if (
                     not break_at_end_lsn
-                    or break_at_end_lsn and lsn_last_received and lsn_last_received <= end_lsn
+                    or break_at_end_lsn and lsn_last_received and lsn_last_received > end_lsn
                 ) and poll_duration > logical_poll_total_seconds:
                     LOGGER.info('Breaking - %i secs of polling with no data', poll_duration)
                     break
@@ -798,12 +798,6 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                 except Exception as e:
                     LOGGER.error(e)
                     raise
-
-                lsn_last_received = cur.wal_end
-
-                if break_at_end_lsn and lsn_last_received > end_lsn:
-                    LOGGER.info('Breaking - latest received lsn %s is past end_lsn %s', printable_lsn(lsni=lsn_last_received), printable_lsn(lsni=end_lsn))
-                    break
 
                 if msg:
                     if msg.data_start <= start_lsn:
@@ -855,10 +849,14 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                     except InterruptedError:
                         pass
 
+                lsn_last_received = cur.wal_end
+
+                if break_at_end_lsn and lsn_last_received > end_lsn:
+                    LOGGER.info('Breaking - latest received lsn %s is past end_lsn %s', printable_lsn(lsni=lsn_last_received), printable_lsn(lsni=end_lsn))
+                    break
+
                 # Every poll_interval, update latest comitted lsn position from the state_file
                 if datetime.datetime.utcnow() >= (poll_timestamp + datetime.timedelta(seconds=poll_interval)):
-                    lsn_last_received = cur.wal_end
-
                     if lsn_last_processed is None:
                         LOGGER.info('Waiting for first wal message')
 
@@ -879,8 +877,6 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                     poll_timestamp = datetime.datetime.utcnow()
         finally:
             pass
-
-    lsn_last_received = cur.wal_end
 
     LOGGER.debug('SKIPPED %i, PROCESSED %i MESSAGES, LAST PROCESSED LSN: %s, LAST RECEIVED LSN: %s', lsn_skipped_count, lsn_processed_count, printable_lsn(lsni=lsn_last_processed), printable_lsn(lsni=lsn_last_received))
 
