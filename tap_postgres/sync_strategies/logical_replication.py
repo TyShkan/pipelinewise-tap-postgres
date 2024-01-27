@@ -451,6 +451,8 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
     # T = Truncate
     action = payload['action']
 
+    payload_timestamp = utils.strptime_to_utc(payload['timestamp'])
+
     if action not in {'I', 'U', 'D', 'T'}:
         raise UnsupportedPayloadKindError(f"unrecognized replication operation: {action}")
 
@@ -529,7 +531,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
                                     del_vals.append(column['value'])
 
                             del_names.append('_sdc_deleted_at')
-                            del_vals.append(payload['timestamp'])
+                            del_vals.append(payload_timestamp)
 
                             if conn_info.get('debug_lsn'):
                                 del_names.append('_sdc_lsn')
@@ -546,7 +548,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
                             stat["counters"]["deleted"] += 1
 
             col_names.append('_sdc_updated_at')
-            col_vals.append(payload['timestamp'])
+            col_vals.append(payload_timestamp)
 
             col_names.append('_sdc_deleted_at')
             col_vals.append(None)
@@ -558,7 +560,7 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
                     col_vals.append(column['value'])
 
             col_names.append('_sdc_deleted_at')
-            col_vals.append(payload['timestamp'])
+            col_vals.append(payload_timestamp)
 
             stat["counters"]["deleted"] += 1
 
@@ -779,14 +781,14 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
         lsn_last_write = start_lsn
         lsn_last_flush = start_lsn
 
-    start_run_timestamp = datetime.datetime.utcnow()
-    lsn_received_timestamp = datetime.datetime.utcnow()
-    poll_timestamp = datetime.datetime.utcnow()
+    start_run_timestamp = utils.now()
+    lsn_received_timestamp = utils.now()
+    poll_timestamp = utils.now()
 
     with record_counter_dynamic() as counter:
         try:
             while True:
-                poll_duration = (datetime.datetime.utcnow() - lsn_received_timestamp).total_seconds()
+                poll_duration = (utils.now() - lsn_received_timestamp).total_seconds()
                 if (
                     not break_at_end_lsn
                     or break_at_end_lsn and lsn_last_received and lsn_last_received > end_lsn
@@ -794,7 +796,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                     LOGGER.info('Breaking - %i secs of polling with no data', poll_duration)
                     break
 
-                if datetime.datetime.utcnow() >= (start_run_timestamp + datetime.timedelta(seconds=max_run_seconds)):
+                if utils.now() >= (start_run_timestamp + datetime.timedelta(seconds=max_run_seconds)):
                     LOGGER.info('Breaking - reached max_run_seconds of %i', max_run_seconds)
                     break
 
@@ -814,7 +816,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                         LOGGER.info('Breaking - latest message received lsn %s is past end_lsn %s', printable_lsn(lsni=msg.data_start), printable_lsn(lsni=end_lsn))
                         break
 
-                    lsn_received_timestamp = datetime.datetime.utcnow()
+                    lsn_received_timestamp = utils.now()
 
                     LOGGER.debug('MSG: data_start %s, wal_end %s, payload %s', printable_lsn(lsni=msg.data_start), printable_lsn(lsni=msg.wal_end), msg.payload)
 
@@ -861,7 +863,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                     break
 
                 # Every poll_interval, update latest comitted lsn position from the state_file
-                if datetime.datetime.utcnow() >= (poll_timestamp + datetime.timedelta(seconds=poll_interval)):
+                if utils.now() >= (poll_timestamp + datetime.timedelta(seconds=poll_interval)):
                     if lsn_last_processed is None:
                         LOGGER.info('Waiting for first wal message')
 
@@ -879,7 +881,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                             cur.send_feedback(write_lsn=lsn_last_processed, reply=True, force=True)
                             lsn_last_write = lsn_last_processed
 
-                    poll_timestamp = datetime.datetime.utcnow()
+                    poll_timestamp = utils.now()
         finally:
             pass
 
