@@ -122,6 +122,7 @@ def fetch_current_lsn(conn_config):
 
 def add_automatic_properties(stream, debug_lsn: bool = False):
     stream['schema']['properties']['_sdc_deleted_at'] = {'type': ['null', 'string'], 'format': 'date-time'}
+    stream['schema']['properties']['_sdc_updated_at'] = {'type': ['null', 'string'], 'format': 'date-time'}
 
     if debug_lsn:
         LOGGER.debug('debug_lsn is ON')
@@ -369,6 +370,7 @@ def selected_value_to_singer_value(elem, sql_datatype, conn_info):
 def row_to_singer_message(stream, row, version, columns, time_extracted, md_map, conn_info):
     row_to_persist = ()
     md_map[('properties', '_sdc_deleted_at')] = {'sql-datatype': 'timestamp with time zone'}
+    md_map[('properties', '_sdc_updated_at')] = {'sql-datatype': 'timestamp with time zone'}
     md_map[('properties', '_sdc_lsn')] = {'sql-datatype': "character varying"}
 
     for idx, elem in enumerate(row):
@@ -542,6 +544,9 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
                                                                 conn_info)
                             singer.write_message(del_message)
                             stat["counters"]["deleted"] += 1
+
+            col_names.append('_sdc_updated_at')
+            col_vals.append(payload['timestamp'])
 
             col_names.append('_sdc_deleted_at')
             col_vals.append(None)
