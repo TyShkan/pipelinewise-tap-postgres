@@ -60,7 +60,7 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
     replication_key_sql_datatype = md_map.get(('properties', replication_key)).get('sql-datatype')
 
     hstore_available = post_db.hstore_available(conn_info)
-    
+
     with record_counter_dynamic() as counter:
         if first_run:
             activate_version_message = singer.ActivateVersionMessage(
@@ -86,7 +86,9 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
             else:
                 LOGGER.info("hstore is UNavailable")
 
-            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name='pipelinewise') as cur:
+            namespace = post_db.get_namespace(conn_info)
+
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name=namespace) as cur:
                 cur.itersize = post_db.CURSOR_ITER_SIZE
                 LOGGER.info("Beginning new incremental replication sync %s", nascent_stream_version)
                 select_sql = _get_select_sql({"escaped_columns": escaped_columns,

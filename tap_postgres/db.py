@@ -36,9 +36,20 @@ def fully_qualified_table_name(schema, table):
     return f'"{canonicalize_identifier(schema)}"."{canonicalize_identifier(table)}"'
 
 
+def get_namespace(conn_config):
+    if conn_config.get('add_user_to_namespace'):
+        namespace = f"{conn_config['namespace']}_{conn_config['user']}"
+    else:
+        namespace = conn_config['namespace']
+
+    return namespace
+
+
 def open_connection(conn_config, logical_replication=False, prioritize_primary=False):
+    namespace = get_namespace(conn_config)
+
     cfg = {
-        'application_name': 'pipelinewise',
+        'application_name': namespace,
         'host': conn_config['host'],
         'dbname': conn_config['dbname'],
         'user': conn_config['user'],

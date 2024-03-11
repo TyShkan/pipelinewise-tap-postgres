@@ -425,7 +425,9 @@ def main_impl():
         'logical_poll_total_seconds': float(args.config.get('logical_poll_total_seconds', 0)),
         'recreate_slot_if_lost': args.config.get('recreate_slot_if_lost', False),
         'use_secondary': args.config.get('use_secondary', False),
-        'limit': int(limit) if limit else None
+        'limit': int(limit) if limit else None,
+        'namespace': args.config.get('namespace', 'pipelinewise'),
+        'add_user_to_namespace': args.config.get('add_user_to_namespace', False),
     }
 
     if conn_config['use_secondary']:

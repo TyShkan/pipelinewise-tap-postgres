@@ -582,12 +582,12 @@ def consume_message(streams, state, msg, time_extracted, conn_info):
     return state, stat
 
 
-def generate_replication_slot_name(dbname, tap_id=None, prefix='pipelinewise'):
+def generate_replication_slot_name(namespace, dbname, tap_id=None):
     """Generate replication slot name with
 
+    :params str namespace: Namespace that will be part of the replication slot name
     :param str dbname: Database name that will be part of the replication slot name
     :param str tap_id: Optional. If provided then it will be appended to the end of the slot name
-    :param str prefix: Optional. Defaults to 'pipelinewise'
     :return: well formatted lowercased replication slot name
     :rtype: str
     """
@@ -598,15 +598,15 @@ def generate_replication_slot_name(dbname, tap_id=None, prefix='pipelinewise'):
     else:
         tap_id = ''
 
-    slot_name = f'{prefix}_{dbname}{tap_id}'.lower()
+    slot_name = f'{namespace}_{dbname}{tap_id}'.lower()
 
     # Replace invalid characters to ensure replication slot name is in accordance with Postgres spec
     return re.sub('[^a-z0-9_]', '_', slot_name)
 
 
-def locate_replication_slot_by_cur(cursor, dbname, tap_id=None, return_status=None):
-    slot_name_v15 = generate_replication_slot_name(dbname)
-    slot_name_v16 = generate_replication_slot_name(dbname, tap_id)
+def locate_replication_slot_by_cur(cursor, namespace, dbname, tap_id=None, return_status=None):
+    slot_name_v15 = generate_replication_slot_name(namespace, dbname)
+    slot_name_v16 = generate_replication_slot_name(namespace, dbname, tap_id)
 
     cursor.execute(f"SELECT wal_status FROM pg_replication_slots WHERE slot_name = '{slot_name_v16}'")
     result = cursor.fetchall()
@@ -631,13 +631,15 @@ def locate_replication_slot_by_cur(cursor, dbname, tap_id=None, return_status=No
 
 
 def locate_replication_slot(conn_info, return_status=None):
+    namespace = post_db.get_namespace(conn_info)
+
     with post_db.open_connection(conn_info, False, True) as conn:
         with conn.cursor() as cur:
-            return locate_replication_slot_by_cur(cur, conn_info['dbname'], conn_info['tap_id'], return_status=return_status)
+            return locate_replication_slot_by_cur(cur, namespace, conn_info['dbname'], conn_info['tap_id'], return_status=return_status)
 
 
-def create_replication_slot_by_cur(cursor, dbname, tap_id=None):
-    slot_name = generate_replication_slot_name(dbname, tap_id)
+def create_replication_slot_by_cur(cursor, namespace, dbname, tap_id=None):
+    slot_name = generate_replication_slot_name(namespace, dbname, tap_id)
 
     try:
         cursor.execute(f"SELECT pg_create_logical_replication_slot('{slot_name}', 'wal2json')")
@@ -649,14 +651,16 @@ def create_replication_slot_by_cur(cursor, dbname, tap_id=None):
 
 
 def create_replication_slot(conn_info):
+    namespace = post_db.get_namespace(conn_info)
+
     with post_db.open_connection(conn_info, False, True) as conn:
         with conn.cursor() as cur:
-            return create_replication_slot_by_cur(cur, conn_info['dbname'], conn_info['tap_id'])
+            return create_replication_slot_by_cur(cur, namespace, conn_info['dbname'], conn_info['tap_id'])
 
 
-def drop_replication_slot_by_cur(cursor, dbname, tap_id=None):
+def drop_replication_slot_by_cur(cursor, namespace, dbname, tap_id=None):
     try:
-        slot_name = locate_replication_slot_by_cur(cursor, dbname, tap_id)
+        slot_name = locate_replication_slot_by_cur(cursor, namespace, dbname, tap_id)
     except ReplicationSlotNotFoundError:
         LOGGER.info(f"Replication slot {slot_name} is not exists")
         return True
@@ -674,9 +678,11 @@ def drop_replication_slot_by_cur(cursor, dbname, tap_id=None):
 
 
 def drop_replication_slot(conn_info):
+    namespace = post_db.get_namespace(conn_info)
+
     with post_db.open_connection(conn_info, False, True) as conn:
         with conn.cursor() as cur:
-            return drop_replication_slot_by_cur(cur, conn_info['dbname'], conn_info['tap_id'])
+            return drop_replication_slot_by_cur(cur, namespace, conn_info['dbname'], conn_info['tap_id'])
 
 
 # pylint: disable=anomalous-backslash-in-string
