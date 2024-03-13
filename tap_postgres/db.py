@@ -11,6 +11,8 @@ import singer
 from typing import List
 from dateutil.parser import parse
 
+CONNECTIONS_COUNTER = 0
+
 LOGGER = singer.get_logger('tap_postgres')
 
 CURSOR_ITER_SIZE = 20000
@@ -55,7 +57,7 @@ def open_connection(conn_config, logical_replication=False, prioritize_primary=F
         'user': conn_config['user'],
         'password': conn_config['password'],
         'port': conn_config['port'],
-        'connect_timeout': 30
+        'connect_timeout': conn_config['port'],
     }
 
     if conn_config['use_secondary'] and not prioritize_primary and not logical_replication:
@@ -74,7 +76,19 @@ def open_connection(conn_config, logical_replication=False, prioritize_primary=F
 
     conn = psycopg2.connect(**cfg)
 
+    global CONNECTIONS_COUNTER
+    CONNECTIONS_COUNTER += 1
+
     return conn
+
+
+def close_connection(conn):
+    if conn:
+        conn.close()
+
+        global CONNECTIONS_COUNTER
+        CONNECTIONS_COUNTER -= 1
+
 
 def prepare_columns_for_select_sql(c, md_map):
     column_name = f' "{canonicalize_identifier(c)}" '
@@ -88,6 +102,7 @@ def prepare_columns_for_select_sql(c, md_map):
                    f'ELSE {column_name} ' \
                    f'END AS {column_name}'
     return column_name
+
 
 def prepare_columns_sql(c):
     column_name = f""" "{canonicalize_identifier(c)}" """
@@ -210,13 +225,19 @@ def selected_row_to_singer_message(stream, row, version, columns, time_extracted
 
 
 def hstore_available(conn_info):
-    with open_connection(conn_info) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name='stitch_cursor') as cur:
-            cur.execute(""" SELECT installed_version FROM pg_available_extensions WHERE name = 'hstore' """)
-            res = cur.fetchone()
-            if res and res[0]:
-                return True
-            return False
+    conn = open_connection(conn_info)
+
+    res = None
+
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name='stitch_cursor') as cur:
+        cur.execute(""" SELECT installed_version FROM pg_available_extensions WHERE name = 'hstore' """)
+        res = cur.fetchone()
+
+    close_connection(conn)
+
+    if res and res[0]:
+        return True
+    return False
 
 
 def compute_tap_stream_id(schema_name, table_name):
@@ -268,19 +289,25 @@ def filter_tables_sql_clause(sql, tables: List[str]):
     in_clause = " AND pg_class.relname in (" + ",".join([f"'{b.strip(' ')}'" for b in tables]) + ")"
     return sql + in_clause
 
+
 def get_database_name(connection):
     cur = connection.cursor()
     rows = cur.execute("SELECT name FROM v$database").fetchall()
     return rows[0][0]
 
+
 def attempt_connection_to_db(conn_config, dbname):
     nascent_config = copy.deepcopy(conn_config)
     nascent_config['dbname'] = dbname
     LOGGER.info('(%s) Testing connectivity...', dbname)
+
     try:
         conn = open_connection(nascent_config)
+
         LOGGER.info('(%s) connectivity verified', dbname)
-        conn.close()
+
+        close_connection(conn)
+
         return True
     except Exception as err:
         LOGGER.warning('Unable to connect to %s. This maybe harmless if you '

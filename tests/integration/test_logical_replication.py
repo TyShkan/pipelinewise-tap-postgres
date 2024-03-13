@@ -72,7 +72,7 @@ class TestLogicalReplication(unittest.TestCase):
                 for rec in records:
                     insert_record(cur, self.table_name, rec)
         finally:
-            conn.close()
+            post_db.close_connection(conn)
 
         state = {}
 
@@ -151,7 +151,7 @@ class TestLogicalReplication(unittest.TestCase):
                 cur.execute(f"delete from {self.table_name} where name='pooper';")
                 cur.execute(f"truncate {self.table_name};")
         finally:
-            conn.close()
+            post_db.close_connection(conn)
 
         # clear the io
         my_stdout.seek(0)

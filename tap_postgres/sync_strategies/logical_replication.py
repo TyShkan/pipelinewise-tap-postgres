@@ -37,10 +37,16 @@ class UnsupportedPayloadKindError(Exception):
 
 # pylint: disable=invalid-name,missing-function-docstring,too-many-branches,too-many-statements,too-many-arguments
 def get_pg_version(conn_info):
-    with post_db.open_connection(conn_info, False, True) as conn:
-        with conn.cursor() as cur:
-            cur.execute("SELECT setting::int AS version FROM pg_settings WHERE name='server_version_num'")
-            version = cur.fetchone()[0]
+    conn = post_db.open_connection(conn_info, False, True)
+
+    version = None
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT setting::int AS version FROM pg_settings WHERE name='server_version_num'")
+        version = cur.fetchone()[0]
+
+    post_db.close_connection(conn)
+
     LOGGER.debug('Detected PostgreSQL version: %s', version)
     return version
 
@@ -107,17 +113,23 @@ def fetch_current_lsn(conn_config):
     if version < 90400:
         raise Exception('Logical replication not supported before PostgreSQL 9.4')
 
-    with post_db.open_connection(conn_config, False, True) as conn:
-        with conn.cursor() as cur:
-            # Use version specific lsn command
-            if version >= 100000:
-                cur.execute("SELECT pg_current_wal_lsn() AS current_lsn")
-            else:
-                cur.execute("SELECT pg_current_xlog_location() AS current_lsn")
+    conn = post_db.open_connection(conn_config, False, True)
 
-            current_lsn = cur.fetchone()[0]
-            LOGGER.debug('Current LSN: %s', printable_lsn(pg_lsn=current_lsn))
-            return lsn_to_int(current_lsn)
+    current_lsn = None
+
+    with conn.cursor() as cur:
+        # Use version specific lsn command
+        if version >= 100000:
+            cur.execute("SELECT pg_current_wal_lsn() AS current_lsn")
+        else:
+            cur.execute("SELECT pg_current_xlog_location() AS current_lsn")
+
+        current_lsn = cur.fetchone()[0]
+
+    post_db.close_connection(conn)
+
+    LOGGER.debug('Current LSN: %s', printable_lsn(pg_lsn=current_lsn))
+    return lsn_to_int(current_lsn)
 
 
 def add_automatic_properties(stream, debug_lsn: bool = False):
@@ -152,72 +164,84 @@ def create_hstore_elem_query(elem):
 
 
 def create_hstore_elem(conn_info, elem):
-    with post_db.open_connection(conn_info, False, True) as conn:
-        with conn.cursor() as cur:
-            query = create_hstore_elem_query(elem)
-            cur.execute(query)
-            res = cur.fetchone()[0]
-            hstore_elem = reduce(tuples_to_map, [res[i:i + 2] for i in range(0, len(res), 2)], {})
-            return hstore_elem
+    conn = post_db.open_connection(conn_info, False, True)
+
+    hstore_elem = None
+
+    with conn.cursor() as cur:
+        query = create_hstore_elem_query(elem)
+        cur.execute(query)
+        res = cur.fetchone()[0]
+        hstore_elem = reduce(tuples_to_map, [res[i:i + 2] for i in range(0, len(res), 2)], {})
+
+    post_db.close_connection(conn)
+
+    return hstore_elem
 
 
 def create_array_elem(elem, sql_datatype, conn_info):
     if elem is None:
         return None
 
-    with post_db.open_connection(conn_info, False, True) as conn:
-        with conn.cursor() as cur:
-            if sql_datatype == 'bit[]':
-                cast_datatype = 'boolean[]'
-            elif sql_datatype == 'boolean[]':
-                cast_datatype = 'boolean[]'
-            elif sql_datatype == 'character varying[]':
-                cast_datatype = 'character varying[]'
-            elif sql_datatype == 'cidr[]':
-                cast_datatype = 'cidr[]'
-            elif sql_datatype == 'citext[]':
-                cast_datatype = 'text[]'
-            elif sql_datatype == 'date[]':
-                cast_datatype = 'text[]'
-            elif sql_datatype == 'double precision[]':
-                cast_datatype = 'double precision[]'
-            elif sql_datatype == 'hstore[]':
-                cast_datatype = 'text[]'
-            elif sql_datatype == 'integer[]':
-                cast_datatype = 'integer[]'
-            elif sql_datatype == 'inet[]':
-                cast_datatype = 'inet[]'
-            elif sql_datatype == 'json[]':
-                cast_datatype = 'text[]'
-            elif sql_datatype == 'jsonb[]':
-                cast_datatype = 'text[]'
-            elif sql_datatype == 'macaddr[]':
-                cast_datatype = 'macaddr[]'
-            elif sql_datatype == 'money[]':
-                cast_datatype = 'text[]'
-            elif sql_datatype == 'numeric[]':
-                cast_datatype = 'text[]'
-            elif sql_datatype == 'real[]':
-                cast_datatype = 'real[]'
-            elif sql_datatype == 'smallint[]':
-                cast_datatype = 'smallint[]'
-            elif sql_datatype == 'text[]':
-                cast_datatype = 'text[]'
-            elif sql_datatype in ('time without time zone[]', 'time with time zone[]'):
-                cast_datatype = 'text[]'
-            elif sql_datatype in ('timestamp with time zone[]', 'timestamp without time zone[]'):
-                cast_datatype = 'text[]'
-            elif sql_datatype == 'uuid[]':
-                cast_datatype = 'text[]'
+    conn = post_db.open_connection(conn_info, False, True)
 
-            else:
-                # custom datatypes like enums
-                cast_datatype = 'text[]'
+    res = None
 
-            sql_stmt = f"""SELECT $stitch_quote${elem}$stitch_quote$::{cast_datatype}"""
-            cur.execute(sql_stmt)
-            res = cur.fetchone()[0]
-            return res
+    with conn.cursor() as cur:
+        if sql_datatype == 'bit[]':
+            cast_datatype = 'boolean[]'
+        elif sql_datatype == 'boolean[]':
+            cast_datatype = 'boolean[]'
+        elif sql_datatype == 'character varying[]':
+            cast_datatype = 'character varying[]'
+        elif sql_datatype == 'cidr[]':
+            cast_datatype = 'cidr[]'
+        elif sql_datatype == 'citext[]':
+            cast_datatype = 'text[]'
+        elif sql_datatype == 'date[]':
+            cast_datatype = 'text[]'
+        elif sql_datatype == 'double precision[]':
+            cast_datatype = 'double precision[]'
+        elif sql_datatype == 'hstore[]':
+            cast_datatype = 'text[]'
+        elif sql_datatype == 'integer[]':
+            cast_datatype = 'integer[]'
+        elif sql_datatype == 'inet[]':
+            cast_datatype = 'inet[]'
+        elif sql_datatype == 'json[]':
+            cast_datatype = 'text[]'
+        elif sql_datatype == 'jsonb[]':
+            cast_datatype = 'text[]'
+        elif sql_datatype == 'macaddr[]':
+            cast_datatype = 'macaddr[]'
+        elif sql_datatype == 'money[]':
+            cast_datatype = 'text[]'
+        elif sql_datatype == 'numeric[]':
+            cast_datatype = 'text[]'
+        elif sql_datatype == 'real[]':
+            cast_datatype = 'real[]'
+        elif sql_datatype == 'smallint[]':
+            cast_datatype = 'smallint[]'
+        elif sql_datatype == 'text[]':
+            cast_datatype = 'text[]'
+        elif sql_datatype in ('time without time zone[]', 'time with time zone[]'):
+            cast_datatype = 'text[]'
+        elif sql_datatype in ('timestamp with time zone[]', 'timestamp without time zone[]'):
+            cast_datatype = 'text[]'
+        elif sql_datatype == 'uuid[]':
+            cast_datatype = 'text[]'
+
+        else:
+            # custom datatypes like enums
+            cast_datatype = 'text[]'
+
+        sql_stmt = f"""SELECT $stitch_quote${elem}$stitch_quote$::{cast_datatype}"""
+        cur.execute(sql_stmt)
+        res = cur.fetchone()[0]
+
+    post_db.close_connection(conn)
+
+    return res
 
 
 # pylint: disable=too-many-branches,too-many-nested-blocks,too-many-return-statements
@@ -633,9 +657,16 @@ def locate_replication_slot_by_cur(cursor, namespace, dbname, tap_id=None, retur
 def locate_replication_slot(conn_info, return_status=None):
     namespace = post_db.get_namespace(conn_info)
 
-    with post_db.open_connection(conn_info, False, True) as conn:
-        with conn.cursor() as cur:
-            return locate_replication_slot_by_cur(cur, namespace, conn_info['dbname'], conn_info['tap_id'], return_status=return_status)
+    conn = post_db.open_connection(conn_info, False, True)
+
+    replecation_slot = None
+
+    with conn.cursor() as cur:
+        replecation_slot = locate_replication_slot_by_cur(cur, namespace, conn_info['dbname'], conn_info['tap_id'], return_status=return_status)
+
+    post_db.close_connection(conn)
+
+    return replecation_slot
 
 
 def create_replication_slot_by_cur(cursor, namespace, dbname, tap_id=None):
@@ -653,10 +684,16 @@ def create_replication_slot_by_cur(cursor, namespace, dbname, tap_id=None):
 def create_replication_slot(conn_info):
     namespace = post_db.get_namespace(conn_info)
 
-    with post_db.open_connection(conn_info, False, True) as conn:
-        with conn.cursor() as cur:
-            return create_replication_slot_by_cur(cur, namespace, conn_info['dbname'], conn_info['tap_id'])
+    conn = post_db.open_connection(conn_info, False, True)
 
+    replication_slot = None
+
+    with conn.cursor() as cur:
+        replication_slot = create_replication_slot_by_cur(cur, namespace, conn_info['dbname'], conn_info['tap_id'])
+
+    post_db.close_connection(conn)
+
+    return replication_slot
 
 def drop_replication_slot_by_cur(cursor, namespace, dbname, tap_id=None):
     try:
@@ -680,9 +717,16 @@ def drop_replication_slot_by_cur(cursor, namespace, dbname, tap_id=None):
 def drop_replication_slot(conn_info):
     namespace = post_db.get_namespace(conn_info)
 
-    with post_db.open_connection(conn_info, False, True) as conn:
-        with conn.cursor() as cur:
-            return drop_replication_slot_by_cur(cur, namespace, conn_info['dbname'], conn_info['tap_id'])
+    conn = post_db.open_connection(conn_info, False, True)
+
+    replication_slot = None
+
+    with conn.cursor() as cur:
+        replication_slot = drop_replication_slot_by_cur(cur, namespace, conn_info['dbname'], conn_info['tap_id'])
+
+    post_db.close_connection(conn)
+
+    return replication_slot
 
 
 # pylint: disable=anomalous-backslash-in-string
@@ -738,17 +782,15 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
 
     version = get_pg_version(conn_info)
 
-    # Create replication connection and cursor
     conn = post_db.open_connection(conn_info, True, True)
     cur = conn.cursor()
 
-    # Set session wal_sender_timeout for PG12 and above
-    if version >= 120000:
-        wal_sender_timeout = 10800000  # 10800000ms = 3 hours
-        LOGGER.debug('Set session wal_sender_timeout = %i ms', wal_sender_timeout)
-        cur.execute(f"SET SESSION wal_sender_timeout = {wal_sender_timeout}")
-
     try:
+        if version >= 120000:
+            wal_sender_timeout = 30000  # 10800000ms = 3 hours
+            LOGGER.debug('Set session wal_sender_timeout = %i ms', wal_sender_timeout)
+            cur.execute(f"SET SESSION wal_sender_timeout = {wal_sender_timeout}")
+
         if end_lsn and start_lsn:
             lsn_total_bytes = end_lsn - start_lsn
 
@@ -779,6 +821,9 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
             }
         )
     except psycopg2.Error as e:
+        cur.close()
+        post_db.close_connection(conn)
+
         raise RuntimeError(f"Can't start replication: {e.diag.message_primary}. {e.diag.message_detail}")
 
     if start_lsn:
@@ -853,7 +898,7 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                             state = singer.write_bookmark(state, s['tap_stream_id'], 'lsn', lsn_last_processed)
                         singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
                         LOGGER.info('Confirming write up to %s', printable_lsn(lsni=lsn_last_processed))
-                        cur.send_feedback(write_lsn=lsn_last_processed, reply=True, force=True)
+                        cur.send_feedback(write_lsn=lsn_last_processed, force=True, reply=True)
                         lsn_last_write = lsn_last_processed
                 else:
                     try:
@@ -874,8 +919,8 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                         LOGGER.info('Waiting for first wal message')
 
                         if lsn_last_received > lsn_last_write or lsn_last_received > lsn_last_flush:
-                            LOGGER.info('Confirming write and flush up to last received %s', printable_lsn(lsni=lsn_last_received))
-                            cur.send_feedback(write_lsn=lsn_last_received, flush_lsn=lsn_last_received, reply=True, force=True)
+                            LOGGER.info('Confirming write and flush up to last received lsn %s', printable_lsn(lsni=lsn_last_received))
+                            cur.send_feedback(write_lsn=lsn_last_received, flush_lsn=lsn_last_received, force=True, reply=True)
                             lsn_last_write = lsn_last_received
                             lsn_last_flush = lsn_last_received
                     else:
@@ -884,45 +929,48 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
 
                         if lsn_last_processed > lsn_comitted and lsn_comitted > start_lsn and lsn_last_processed > lsn_last_write:
                             LOGGER.info('Confirming write up to latest processed %s', printable_lsn(lsni=lsn_last_processed))
-                            cur.send_feedback(write_lsn=lsn_last_processed, reply=True, force=True)
+                            cur.send_feedback(write_lsn=lsn_last_processed, force=True, reply=True)
                             lsn_last_write = lsn_last_processed
 
                     poll_timestamp = utils.now()
+
+            LOGGER.info('SKIPPED %i, PROCESSED %i MESSAGES, LAST PROCESSED LSN: %s, LAST RECEIVED LSN: %s', lsn_skipped_count, lsn_processed_count, printable_lsn(lsni=lsn_last_processed), printable_lsn(lsni=lsn_last_received))
+
+            if lsn_skipped_count > 0:
+                LOGGER.info('Skipped %i messages with lsn <= start_lsn %s', lsn_skipped_count, printable_lsn(lsni=start_lsn))
+
+            if lsn_last_processed:
+                lsn_total_bytes = lsn_last_processed - start_lsn
+                LOGGER.info('Processed total %i messages, updating bookmarks for all streams to last processed lsn %s (%s)', lsn_processed_count, printable_lsn(lsni=lsn_last_processed), sync_common.size_bytes_to_human(lsn_total_bytes))
+                for s in logical_streams:
+                    state = singer.write_bookmark(state, s['tap_stream_id'], 'lsn', lsn_last_processed)
+                singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
+
+                if lsn_last_processed > lsn_last_write:
+                    LOGGER.info('Confirming write up to latest processed %s', printable_lsn(lsni=lsn_last_processed))
+                    cur.send_feedback(write_lsn=lsn_last_processed, flush_lsn=start_lsn or 0, force=True, reply=True)
+                    lsn_last_write = lsn_last_processed
+            elif lsn_last_received:
+                lsn_total_bytes = lsn_last_received - start_lsn
+
+                LOGGER.info('No new messages received, updating bookmarks for all streams to last received lsn %s (%s)', printable_lsn(lsni=lsn_last_received), sync_common.size_bytes_to_human(lsn_total_bytes))
+                for s in logical_streams:
+                    state = singer.write_bookmark(state, s['tap_stream_id'], 'lsn', lsn_last_received)
+                singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
+
+                if lsn_last_received > lsn_last_write or lsn_last_received > lsn_last_flush:
+                    LOGGER.info('Confirming write and flush up to last received lsn %s', printable_lsn(lsni=lsn_last_received))
+                    cur.send_feedback(write_lsn=lsn_last_received, flush_lsn=lsn_last_received, force=True, reply=True)
+                    lsn_last_write = lsn_last_received
+                    lsn_last_flush = lsn_last_received
+            else:
+                LOGGER.info('No confirmation sent to server')
+        except Exception as e:
+            LOGGER.error(e)
         finally:
             pass
 
-    LOGGER.debug('SKIPPED %i, PROCESSED %i MESSAGES, LAST PROCESSED LSN: %s, LAST RECEIVED LSN: %s', lsn_skipped_count, lsn_processed_count, printable_lsn(lsni=lsn_last_processed), printable_lsn(lsni=lsn_last_received))
-
-    if lsn_skipped_count > 0:
-        LOGGER.info('Skipped %i messages with lsn <= start_lsn %s', lsn_skipped_count, printable_lsn(lsni=start_lsn))
-
-    if lsn_last_processed:
-        lsn_total_bytes = lsn_last_processed - start_lsn
-        LOGGER.info('Processed total %i messages, updating bookmarks for all streams to last processed lsn %s (%s)', lsn_processed_count, printable_lsn(lsni=lsn_last_processed), sync_common.size_bytes_to_human(lsn_total_bytes))
-        for s in logical_streams:
-            state = singer.write_bookmark(state, s['tap_stream_id'], 'lsn', lsn_last_processed)
-        singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
-
-        if lsn_last_processed > lsn_last_write:
-            LOGGER.info('Confirming write up to latest processed %s', printable_lsn(lsni=lsn_last_processed))
-            cur.send_feedback(write_lsn=lsn_last_processed, force=True)
-            lsn_last_write = lsn_last_processed
-    elif lsn_last_received:
-        lsn_total_bytes = lsn_last_received - start_lsn
-
-        LOGGER.info('No new messages received, updating bookmarks for all streams to last received lsn %s (%s)', printable_lsn(lsni=lsn_last_received), sync_common.size_bytes_to_human(lsn_total_bytes))
-        for s in logical_streams:
-            state = singer.write_bookmark(state, s['tap_stream_id'], 'lsn', lsn_last_received)
-        singer.write_message(singer.StateMessage(value=copy.deepcopy(state)))
-
-        if lsn_last_received > lsn_last_write or lsn_last_received > lsn_last_flush:
-            LOGGER.info('Confirming write and flush up to last received lsn %s', printable_lsn(lsni=lsn_last_received))
-            cur.send_feedback(write_lsn=lsn_last_received, flush_lsn=lsn_last_received, force=True)
-            lsn_last_write = lsn_last_received
-            lsn_last_flush = lsn_last_received
-
-    # Close replication connection and cursor
     cur.close()
-    conn.close()
+    post_db.close_connection(conn)
 
     return state

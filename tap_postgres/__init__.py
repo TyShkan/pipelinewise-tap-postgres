@@ -40,9 +40,12 @@ def do_discovery(conn_config):
 
     Returns: list of discovered streams
     """
-    with post_db.open_connection(conn_config) as conn:
-        LOGGER.info("Discovering db %s", conn_config['dbname'])
-        streams = discover_db(conn, conn_config.get('filter_schemas'))
+    conn = post_db.open_connection(conn_config)
+
+    LOGGER.info("Discovering db %s", conn_config['dbname'])
+    streams = discover_db(conn, conn_config.get('filter_schemas'))
+
+    post_db.close_connection(conn)
 
     if len(streams) == 0:
         raise RuntimeError('0 tables were discovered across the entire cluster')
@@ -242,49 +245,52 @@ def register_type_adapters(conn_config):
     """
     //todo doc needed
     """
-    with post_db.open_connection(conn_config) as conn:
-        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
-            # citext[]
-            cur.execute("SELECT typarray FROM pg_type where typname = 'citext'")
-            citext_array_oid = cur.fetchone()
-            if citext_array_oid:
-                psycopg2.extensions.register_type(
-                    psycopg2.extensions.new_array_type(
-                        (citext_array_oid[0],), 'CITEXT[]', psycopg2.STRING))
+    conn = post_db.open_connection(conn_config)
 
-            # bit[]
-            cur.execute("SELECT typarray FROM pg_type where typname = 'bit'")
-            bit_array_oid = cur.fetchone()[0]
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+        # citext[]
+        cur.execute("SELECT typarray FROM pg_type where typname = 'citext'")
+        citext_array_oid = cur.fetchone()
+        if citext_array_oid:
             psycopg2.extensions.register_type(
                 psycopg2.extensions.new_array_type(
-                    (bit_array_oid,), 'BIT[]', psycopg2.STRING))
+                    (citext_array_oid[0],), 'CITEXT[]', psycopg2.STRING))
 
-            # UUID[]
-            cur.execute("SELECT typarray FROM pg_type where typname = 'uuid'")
-            uuid_array_oid = cur.fetchone()[0]
+        # bit[]
+        cur.execute("SELECT typarray FROM pg_type where typname = 'bit'")
+        bit_array_oid = cur.fetchone()[0]
+        psycopg2.extensions.register_type(
+            psycopg2.extensions.new_array_type(
+                (bit_array_oid,), 'BIT[]', psycopg2.STRING))
+
+        # UUID[]
+        cur.execute("SELECT typarray FROM pg_type where typname = 'uuid'")
+        uuid_array_oid = cur.fetchone()[0]
+        psycopg2.extensions.register_type(
+            psycopg2.extensions.new_array_type(
+                (uuid_array_oid,), 'UUID[]', psycopg2.STRING))
+
+        # money[]
+        cur.execute("SELECT typarray FROM pg_type where typname = 'money'")
+        money_array_oid = cur.fetchone()[0]
+        psycopg2.extensions.register_type(
+            psycopg2.extensions.new_array_type(
+                (money_array_oid,), 'MONEY[]', psycopg2.STRING))
+
+        # json and jsonb
+        # pylint: disable=unnecessary-lambda
+        psycopg2.extras.register_default_json(loads=lambda x: str(x))
+        psycopg2.extras.register_default_jsonb(loads=lambda x: str(x))
+
+        # enum[]'s
+        cur.execute("SELECT distinct(t.typarray) FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid")
+        for oid in cur.fetchall():
+            enum_oid = oid[0]
             psycopg2.extensions.register_type(
                 psycopg2.extensions.new_array_type(
-                    (uuid_array_oid,), 'UUID[]', psycopg2.STRING))
+                    (enum_oid,), f'ENUM_{enum_oid}[]', psycopg2.STRING))
 
-            # money[]
-            cur.execute("SELECT typarray FROM pg_type where typname = 'money'")
-            money_array_oid = cur.fetchone()[0]
-            psycopg2.extensions.register_type(
-                psycopg2.extensions.new_array_type(
-                    (money_array_oid,), 'MONEY[]', psycopg2.STRING))
-
-            # json and jsonb
-            # pylint: disable=unnecessary-lambda
-            psycopg2.extras.register_default_json(loads=lambda x: str(x))
-            psycopg2.extras.register_default_jsonb(loads=lambda x: str(x))
-
-            # enum[]'s
-            cur.execute("SELECT distinct(t.typarray) FROM pg_type t JOIN pg_enum e ON t.oid = e.enumtypid")
-            for oid in cur.fetchall():
-                enum_oid = oid[0]
-                psycopg2.extensions.register_type(
-                    psycopg2.extensions.new_array_type(
-                        (enum_oid,), f'ENUM_{enum_oid}[]', psycopg2.STRING))
+    post_db.close_connection(conn)
 
 
 def do_sync(conn_config, catalog, default_replication_method, state, state_file=None):
@@ -428,6 +434,7 @@ def main_impl():
         'limit': int(limit) if limit else None,
         'namespace': args.config.get('namespace', 'pipelinewise'),
         'add_user_to_namespace': args.config.get('add_user_to_namespace', False),
+        'connect_timeout': args.config.get('connect_timeout', 30),
     }
 
     if conn_config['use_secondary']:
@@ -463,7 +470,9 @@ def main():
     main
     """
     try:
+        LOGGER.info('CONNECTIONS_COUNTER = %s', post_db.CONNECTIONS_COUNTER)
         main_impl()
+        LOGGER.info('CONNECTIONS_COUNTER = %s', post_db.CONNECTIONS_COUNTER)
     except Exception as exc:
         LOGGER.critical(exc)
         raise exc
