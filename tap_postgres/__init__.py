@@ -470,9 +470,7 @@ def main():
     main
     """
     try:
-        LOGGER.info('CONNECTIONS_COUNTER = %s', post_db.CONNECTIONS_COUNTER)
         main_impl()
-        LOGGER.info('CONNECTIONS_COUNTER = %s', post_db.CONNECTIONS_COUNTER)
     except Exception as exc:
         LOGGER.critical(exc)
         raise exc

@@ -11,8 +11,6 @@ import singer
 from typing import List
 from dateutil.parser import parse
 
-CONNECTIONS_COUNTER = 0
-
 LOGGER = singer.get_logger('tap_postgres')
 
 CURSOR_ITER_SIZE = 20000
@@ -57,7 +55,7 @@ def open_connection(conn_config, logical_replication=False, prioritize_primary=F
         'user': conn_config['user'],
         'password': conn_config['password'],
         'port': conn_config['port'],
-        'connect_timeout': conn_config['port'],
+        'connect_timeout': conn_config['connect_timeout'],
     }
 
     if conn_config['use_secondary'] and not prioritize_primary and not logical_replication:
@@ -76,18 +74,12 @@ def open_connection(conn_config, logical_replication=False, prioritize_primary=F
 
     conn = psycopg2.connect(**cfg)
 
-    global CONNECTIONS_COUNTER
-    CONNECTIONS_COUNTER += 1
-
     return conn
 
 
 def close_connection(conn):
     if conn:
         conn.close()
-
-        global CONNECTIONS_COUNTER
-        CONNECTIONS_COUNTER -= 1
 
 
 def prepare_columns_for_select_sql(c, md_map):
