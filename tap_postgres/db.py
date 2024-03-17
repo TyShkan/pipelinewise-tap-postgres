@@ -1,5 +1,6 @@
 import copy
 import datetime
+import time
 import json
 import decimal
 import math
@@ -72,9 +73,19 @@ def open_connection(conn_config, logical_replication=False, prioritize_primary=F
     if logical_replication:
         cfg['connection_factory'] = psycopg2.extras.LogicalReplicationConnection
 
-    conn = psycopg2.connect(**cfg)
+    for retry in range(conn_config['connect_retries']):
+        try:
+            return psycopg2.connect(**cfg)
+        except (psycopg2.InterfaceError, psycopg2.OperationalError) as e:
+            LOGGER.warning(f"Can't connect to DB [{retry+1} attempt]: {e}")
 
-    return conn
+            if retry == conn_config['connect_retries'] - 1:
+                raise e
+
+            sleep_sec = conn_config['connect_retry_sleep'] ** (retry + 1)
+
+            LOGGER.info(f"Sleep for {sleep_sec} sec...")
+            time.sleep(sleep_sec)
 
 
 def close_connection(conn):

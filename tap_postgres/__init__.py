@@ -435,6 +435,8 @@ def main_impl():
         'namespace': args.config.get('namespace', 'pipelinewise'),
         'add_user_to_namespace': args.config.get('add_user_to_namespace', False),
         'connect_timeout': args.config.get('connect_timeout', 30),
+        'connect_retries': args.config.get('connect_retries', 1),
+        'connect_retry_sleep': args.config.get('connect_retry_sleep', 3),
     }
 
     if conn_config['use_secondary']:
