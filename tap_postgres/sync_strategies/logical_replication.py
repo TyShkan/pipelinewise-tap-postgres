@@ -963,6 +963,11 @@ def sync_tables(conn_info, logical_streams, state, end_lsn, state_file):
                     cur.send_feedback(write_lsn=lsn_last_received, flush_lsn=lsn_last_received, force=True, reply=True)
                     lsn_last_write = lsn_last_received
                     lsn_last_flush = lsn_last_received
+                else:
+                    LOGGER.info(
+                        "Can't confirm write or flush: last received %s, last write %s, last flush %s",
+                        printable_lsn(lsni=lsn_last_received), printable_lsn(lsni=lsn_last_write), printable_lsn(lsni=lsn_last_flush)
+                    )
             else:
                 LOGGER.info('No confirmation sent to server')
         except Exception as e:
