@@ -63,6 +63,7 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
     replication_key = md_map.get((), {}).get('replication-key')
     replication_key_value = singer.get_bookmark(state, stream['tap_stream_id'], 'replication_key_value')
     replication_key_sql_datatype = md_map.get(('properties', replication_key)).get('sql-datatype')
+    exclude_last_replication_key = md_map.get((), {}).get('exclude-last-replication-key', False)
 
     hstore_available = post_db.hstore_available(conn_info)
 
@@ -96,14 +97,16 @@ def sync_table(conn_info, stream, state, desired_columns, md_map):
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor, name=namespace) as cur:
             cur.itersize = post_db.CURSOR_ITER_SIZE
             LOGGER.info("Beginning new incremental replication sync %s", nascent_stream_version)
-            select_sql = _get_select_sql({"escaped_columns": escaped_columns,
-                                            "replication_key": replication_key,
-                                            "replication_key_sql_datatype": replication_key_sql_datatype,
-                                            "replication_key_value": replication_key_value,
-                                            "schema_name": schema_name,
-                                            "table_name": stream['table_name'],
-                                            "limit": conn_info['limit']
-                                            })
+            select_sql = _get_select_sql({
+                "escaped_columns": escaped_columns,
+                "replication_key": replication_key,
+                "replication_key_sql_datatype": replication_key_sql_datatype,
+                "replication_key_value": replication_key_value,
+                "schema_name": schema_name,
+                "table_name": stream['table_name'],
+                "limit": conn_info['limit'],
+                "exclude_last_replication_key": exclude_last_replication_key,
+            })
             LOGGER.info('select statement: %s with itersize %s', select_sql, cur.itersize)
             cur.execute(select_sql)
 
@@ -141,12 +144,14 @@ def _get_select_sql(params):
     escaped_columns = params['escaped_columns']
     replication_key = post_db.prepare_columns_sql(params['replication_key'])
     replication_key_sql_datatype = params['replication_key_sql_datatype']
+    exclude_last_replication_key = params['exclude_last_replication_key']
     replication_key_value = params['replication_key_value']
     schema_name = params['schema_name']
     table_name = params['table_name']
 
     limit_statement = f'LIMIT {params["limit"]}' if params["limit"] else ''
-    where_statement = f"WHERE {replication_key} >= '{replication_key_value}'::{replication_key_sql_datatype}" \
+    where_condition = ">" if exclude_last_replication_key else ">="
+    where_statement = f"WHERE {replication_key} {where_condition} '{replication_key_value}'::{replication_key_sql_datatype}" \
         if replication_key_value else ""
 
     select_sql = f"""
